@@ -66,7 +66,7 @@ function start(nextSeed = seed) {
   seed = nextSeed;
   game = createGame(seed); rows = game.course();
   recorded = false; playing = true; paused = false; queue = [];
-  accumulator = 0; previousFrame = null; music.lastBeat = -1;
+  accumulator = 0; previousFrame = null; music.reset();
   beginSession(); music.gesture(); persist();
   $('seed').textContent = seed; $('replay').disabled = true;
   $('pause').disabled = false; $('exit').disabled = false; $('pause').textContent = 'Pause';
@@ -161,8 +161,9 @@ $('left').onclick = () => move('left'); $('right').onclick = () => move('right')
 $('pause').onclick = togglePause;
 $('exit').onclick = () => endSession();
 $('mute').onclick = () => {
-  music.gesture(); if (!save) return;
-  save.settings.mute = !save.settings.mute; persist();
+  if (!save) return;
+  save.settings.mute = !save.settings.mute;
+  music.setMute(save.settings.mute); music.gesture(); persist();
 };
 $('save').onclick = () => { persist(); };
 $('load').onclick = () => {
@@ -198,7 +199,6 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) music.quiet();
   else {
     if (session && Date.now() - lastActive >= 300000) endSession('Session ended after five minutes without active play.');
-    if (playing && !paused) music.gesture();
   }
 });
 window.addEventListener('pagehide', () => endSession());

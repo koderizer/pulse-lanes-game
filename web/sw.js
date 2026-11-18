@@ -1,4 +1,4 @@
-const CACHE = 'pulse-lanes-pl-web-0.1.0';
+const CACHE = 'pulse-lanes-pl-web-0.1.0-fb1';
 const ASSETS = ['./', './index.html', './style.css', './app.js', './digest.js', './music.js',
   '../src/sim/pulse_lanes.js', '../src/state/pilot_state.js', '../src/shared/strict_json.js',
   '../release/supported_builds.json'];

@@ -1,6 +1,18 @@
 export class Music {
-  constructor() { this.context = null; this.muted = false; this.lastBeat = -1; }
+  constructor() {
+    this.context = null;
+    this.muted = false;
+    this.lastBeat = -1;
+    this.latestTick = null;
+    this.pendingTick = null;
+    this.unlockError = null;
+    this.attempt = null;
+    this.unlocked = false;
+    this.quietMode = false;
+    this.suspensions = new Set();
+  }
   gesture() {
+    this.quietMode = false;
     if (!this.context) {
       const Audio = globalThis.AudioContext ?? globalThis.webkitAudioContext;
       if (!Audio) return;
@@ -8,19 +20,77 @@ export class Music {
       this.gain = this.context.createGain();
       this.gain.connect(this.context.destination);
       this.setMute(this.muted);
+      this.context.addEventListener('statechange', () => this.drain());
     }
-    this.context.resume().catch(() => {});
+    if (this.attempt) return;
+    if (this.unlocked && this.context.state === 'running' && !this.suspensions.size) {
+      this.drain();
+      return;
+    }
+    this.unlock();
+  }
+  unlock() {
+    const attempt = {error: null};
+    this.attempt = attempt;
+    this.unlocked = false;
+    this.unlockError = null;
+    let resume;
+    try {
+      resume = this.context.resume();
+    } catch (error) {
+      attempt.error = String(error?.message ?? error);
+    }
+    // Both operations belong to the gesture stack, even if resume throws.
+    try {
+      const buffer = this.context.createBuffer(1, 1, this.context.sampleRate);
+      buffer.getChannelData(0).fill(0);
+      const source = this.context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(this.context.destination);
+      source.onended = () => source.disconnect();
+      source.start(0);
+    } catch (error) {
+      attempt.error = attempt.error ?? String(error?.message ?? error);
+    }
+    Promise.resolve(resume).then(
+      () => this.finishUnlock(attempt),
+      error => {
+        attempt.error = attempt.error ?? String(error?.message ?? error);
+        this.finishUnlock(attempt);
+      },
+    );
+  }
+  finishUnlock(attempt) {
+    // Canceled attempts cannot change the current run's success/error state.
+    if (this.attempt !== attempt) return;
+    this.attempt = null;
+    this.unlockError = attempt.error;
+    this.unlocked = attempt.error === null;
+    this.drain();
   }
   setMute(muted) {
     this.muted = muted;
     if (this.gain) this.gain.gain.value = muted ? 0 : 0.16;
+    if (muted) this.pendingTick = null;
+  }
+  period(tick) {
+    return [40,30,24][Math.min(2, Math.floor(tick / 2400))];
   }
   beat(tick) {
-    if (!this.context || this.context.state !== 'running') return;
-    const stage = Math.min(2, Math.floor(tick / 2400)), period = [40,30,24][stage];
-    if (tick % period || tick === this.lastBeat) return;
-    this.lastBeat = tick;
-    const index = Math.floor(tick / period) % 8;
+    this.latestTick = tick;
+    if (this.pendingTick !== null && tick >= this.pendingTick + this.period(this.pendingTick)) {
+      this.pendingTick = null;
+    }
+    if (this.muted || this.quietMode) return;
+    if (tick % this.period(tick) === 0 && tick !== this.lastBeat) this.pendingTick = tick;
+    this.drain();
+  }
+  drain() {
+    if (this.pendingTick === null || this.muted || this.quietMode || this.suspensions.size ||
+        this.attempt || !this.unlocked || this.context?.state !== 'running') return;
+    const tick = this.pendingTick;
+    if (this.latestTick < tick || this.latestTick >= tick + this.period(tick)) return;
+    const index = Math.floor(tick / this.period(tick)) % 8;
     const now = this.context.currentTime;
     for (const frequency of [[220,261.63,329.63,293.66,220,329.63,392,293.66][index], 110]) {
       const oscillator = this.context.createOscillator(), envelope = this.context.createGain();
@@ -33,6 +103,44 @@ export class Music {
       oscillator.start(now); oscillator.stop(now + 0.24);
       oscillator.onended = () => { oscillator.disconnect(); envelope.disconnect(); };
     }
+    this.lastBeat = tick;
+    this.pendingTick = null;
   }
-  quiet() { if (this.context?.state === 'running') this.context.suspend().catch(() => {}); }
+  quiet() {
+    this.quietMode = true;
+    this.pendingTick = null;
+    this.attempt = null;
+    this.unlocked = false;
+    if (!this.context) return;
+    const suspension = {};
+    this.suspensions.add(suspension);
+    const settled = () => {
+      this.suspensions.delete(suspension);
+      if (!this.quietMode && !this.suspensions.size) {
+        // A recovery gesture may have resumed before suspend took effect.
+        // Supersede that attempt and require a clean post-suspension unlock.
+        this.unlock();
+      }
+    };
+    try {
+      Promise.resolve(this.context.suspend()).then(settled, settled);
+    } catch {
+      settled();
+    }
+  }
+  reset() {
+    this.quiet();
+    this.latestTick = null;
+    this.lastBeat = -1;
+  }
+  inspect() {
+    return {
+      contextState: this.context?.state ?? null,
+      muted: this.muted,
+      unlockPending: this.attempt !== null,
+      pendingTick: this.pendingTick,
+      lastBeat: this.lastBeat,
+      unlockError: this.unlockError,
+    };
+  }
 }
