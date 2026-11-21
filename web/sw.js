@@ -1,5 +1,10 @@
-const CACHE = 'pulse-lanes-pl-web-0.1.0-fb1';
-const ASSETS = ['./', './index.html', './style.css', './app.js', './digest.js', './music.js',
+// Spec section 16: cache name follows the release build_id (pl-web-0.2.0). A presentation-only
+// fix of the same build appends -fbN. W4/W5 append their render and loop modules to ASSETS
+// when those files exist (cache.addAll fails the whole install on a single 404).
+const CACHE = 'pulse-lanes-pl-web-0.2.0';
+const ASSETS = ['./', './index.html', './lobby.css', './app.js', './digest.js', './music.js', './score_voice.js',
+  './lobby_model.js', './hud.js', './pause.js',
+  '../src/sim/space_racer.js', '../src/input/controls.js',
   '../src/sim/pulse_lanes.js', '../src/state/pilot_state.js', '../src/shared/strict_json.js',
   '../release/supported_builds.json'];
 self.addEventListener('install', event => {

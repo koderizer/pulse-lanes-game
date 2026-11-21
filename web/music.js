@@ -1,7 +1,11 @@
+// AU-9: master gain per music level 0 .. 10; LEVEL_GAIN[10] = 0.16 keeps AU-7 intact at the default.
+export const LEVEL_GAIN = Object.freeze([0, 0.016, 0.032, 0.048, 0.064, 0.08, 0.096, 0.112, 0.128, 0.144, 0.16]);
+
 export class Music {
   constructor() {
     this.context = null;
     this.muted = false;
+    this.level = 10;
     this.lastBeat = -1;
     this.latestTick = null;
     this.pendingTick = null;
@@ -70,8 +74,22 @@ export class Music {
   }
   setMute(muted) {
     this.muted = muted;
-    if (this.gain) this.gain.gain.value = muted ? 0 : 0.16;
+    this.applyGain();
     if (muted) this.pendingTick = null;
+  }
+  // Presentation only. Remembered before the context exists; never creates audio nodes.
+  setLevel(level) {
+    if (!Number.isInteger(level) || level < 0 || level > 10) throw new RangeError('music level must be an integer 0 .. 10');
+    this.level = level;
+    this.applyGain();
+  }
+  applyGain() {
+    if (this.gain) this.gain.gain.value = this.muted ? 0 : LEVEL_GAIN[this.level];
+  }
+  // True when a voice may create oscillators now (same gate drain() applies to the beat).
+  ready() {
+    return Boolean(this.context && this.gain) && !this.muted && !this.quietMode && !this.suspensions.size &&
+      !this.attempt && this.unlocked && this.context.state === 'running';
   }
   period(tick) {
     return [40,30,24][Math.min(2, Math.floor(tick / 2400))];

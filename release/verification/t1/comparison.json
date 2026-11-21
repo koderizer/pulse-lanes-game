@@ -1,0 +1,30 @@
+{
+  "candidates": [
+    {
+      "cases": 128,
+      "kind": "cmd",
+      "label": "node",
+      "mismatch_count": 0,
+      "mismatches": [],
+      "run1_run2_differ": [],
+      "runs": 256,
+      "source": "node tools/replay_cli.mjs"
+    },
+    {
+      "cases": 128,
+      "kind": "cmd",
+      "label": "python",
+      "mismatch_count": 0,
+      "mismatches": [],
+      "run1_run2_differ": [],
+      "runs": 256,
+      "source": "/home/akelv/github/dual-loop-rsi/.venv/bin/python -m server.verifier replay"
+    }
+  ],
+  "check": "T1",
+  "expected_sha256": "837da01d44b17da1988e976820083fe89a2592184869e818369f9c0c4e7d218b",
+  "manifest_sha256": "719a786392b65b969d7d57ae18ec48cd9eb7da6060557b6e2cde4119135db3cd",
+  "mismatch_count": 0,
+  "schema_version": 1,
+  "status": "PASS"
+}

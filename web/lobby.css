@@ -1,0 +1,66 @@
+/* Client shell styles (spec 6.1 touch layout, 14 lobby / HUD / pause). Presentation only.
+   Convention for the client loop: add class "running" to <body> while a run is in progress
+   (HUD and touch controls visible); remove it when the lobby opens. */
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#101323;color:#eef1ff;font-synthesis:none;
+  --edge:24px;--cyan:#69e2d3;--panel:#171c30;--line:#30374f}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none;touch-action:none;-webkit-user-select:none;user-select:none}
+canvas#canvas{position:fixed;inset:0;width:100%;height:100%;display:block;background:#101323}
+
+button,.button{font:inherit;cursor:pointer;background:#242c46;color:#eef1ff;border:1px solid #3d4764;border-radius:9px;padding:11px 15px;text-align:center}
+button:hover,.button:hover{background:#33405e}
+button:focus-visible,.button:focus-within,input:focus-visible,select:focus-visible{outline:3px solid var(--cyan);outline-offset:3px}
+button:disabled{opacity:.4;cursor:default}
+.primary{background:var(--cyan);color:#101323;font-weight:700}
+.primary:hover{background:#9cf0e5}
+.row{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0}
+input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+
+/* HUD: status only, top of the screen, never intercepts the stick or buttons. */
+#hud{position:fixed;left:0;right:0;top:0;display:none;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:calc(10px + env(safe-area-inset-top)) calc(var(--edge) + env(safe-area-inset-right)) 10px calc(var(--edge) + env(safe-area-inset-left));
+  font-size:13px;font-weight:700;letter-spacing:.5px;font-variant-numeric:tabular-nums;pointer-events:none;text-shadow:0 1px 2px #000}
+#hud #hud-pause{pointer-events:auto;margin-left:auto;padding:6px 12px;font-size:13px}
+#hud-energy{display:flex;align-items:center;gap:8px;min-width:150px}
+#hud-energy .bar{display:block;flex:1;height:10px;border:1px solid #3d4764;border-radius:6px;background:#0b0e1a;overflow:hidden}
+#hud-energy .bar i{display:block;height:100%;width:100%;background:var(--cyan);transition:none}
+#hud-energy[data-locked="true"] .bar i{background:#ff8e8e}
+body.running #hud,body.running #touch{display:flex}
+#touch{display:none}
+
+/* Thumb circle: 128 px diameter, centre 24 + 64 px from the right and bottom edges. */
+#stick{position:fixed;right:calc(var(--edge) + env(safe-area-inset-right));bottom:calc(var(--edge) + env(safe-area-inset-bottom));
+  width:128px;height:128px;border-radius:50%;border:2px solid #4c5a82;background:rgba(36,44,70,.45);touch-action:none}
+#stick .ring{position:absolute;left:50%;top:50%;width:19.2px;height:19.2px;margin:-9.6px 0 0 -9.6px;border-radius:50%;border:1px dashed #8e9ab9}
+#stick .knob{position:absolute;left:50%;top:50%;width:44px;height:44px;margin:-22px 0 0 -22px;border-radius:50%;background:rgba(105,226,211,.55);
+  border:2px solid var(--cyan);transform:translate(var(--kx,0px),var(--ky,0px))}
+
+/* Bottom-left cluster, 24 px from the left and bottom edges: hop-left, 12 px, fire, 12 px, hop-right. */
+#cluster{position:fixed;left:calc(var(--edge) + env(safe-area-inset-left));bottom:calc(var(--edge) + env(safe-area-inset-bottom));
+  display:flex;align-items:center;gap:12px}
+#cluster button{touch-action:none;padding:0;font-size:26px;line-height:1}
+#hop-left,#hop-right{width:64px;height:64px;border-radius:14px}
+#fire{width:72px;height:72px;border-radius:50%;background:#e03a3e;border:3px solid #ff8e8e}
+#fire:hover{background:#ef4a4e}
+#fire:active{background:#b92b2f}
+
+#pause-overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(8,10,20,.72);z-index:20}
+#pause-overlay[hidden]{display:none}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:24px 28px;text-align:center}
+.panel h2{margin:0 0 6px}
+
+dialog#lobby{max-width:min(620px,calc(100vw - 24px));max-height:calc(100vh - 24px);overflow:auto;padding:24px;
+  background:var(--panel);color:inherit;border:1px solid var(--line);border-radius:20px;touch-action:pan-y;-webkit-user-select:text;user-select:text}
+dialog#lobby::backdrop{background:rgba(8,10,20,.8)}
+#lobby h1{font-size:clamp(32px,7vw,48px);letter-spacing:-2px;margin:0}
+#lobby h2{font-size:18px;margin:20px 0 6px}
+#lobby .eyebrow{font-size:11px;letter-spacing:3px;color:var(--cyan);margin:4px 0 12px}
+#lobby label{display:block;margin-top:10px}
+#lobby label.check{display:flex;align-items:center;gap:8px}
+#lobby label.button{display:inline-block;margin-top:0}
+#lobby input[type=range],#lobby select{width:100%;max-width:320px;font:inherit}
+#lobby ul{margin:0;padding-left:20px;color:#a7afc9}
+#lobby footer{margin-top:16px;color:#a7afc9;font-size:13px}
+#notice{min-height:22px;color:#f7d7a1}
+
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}

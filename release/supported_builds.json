@@ -1,1 +1,1 @@
-{"builds":[{"build_id":"pl-web-0.1.0","ruleset_id":"pl-v1"}],"protocol_version":1,"schema_version":1}
+{"builds":[{"build_id":"pl-web-0.1.0","ruleset_id":"pl-v1"},{"build_id":"pl-web-0.2.0","ruleset_id":"pl-v2"}],"protocol_version":2,"schema_version":1}

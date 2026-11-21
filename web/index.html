@@ -2,31 +2,89 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#101323">
   <title>Pulse Lanes</title>
-  <link rel="stylesheet" href="./style.css">
+  <link rel="stylesheet" href="./lobby.css">
 </head>
 <body>
-  <main>
-    <header><p class="eyebrow">THREE LANES · ONE RHYTHM</p><h1>Pulse Lanes<span>↗</span></h1>
-      <p>Find the open lane. Survive the rising tempo.</p></header>
-    <section class="game" aria-label="Game">
-      <div class="stats"><span id="tempo">90 BPM</span><span id="score">0 / 7200 ticks</span><span id="stage">STAGE 1 / 3</span></div>
-      <canvas id="canvas" width="600" height="720" aria-label="Three lanes. Move the cyan player away from incoming coral obstacles."></canvas>
-      <p id="status" role="status">Press Play to start. Use ← and → to move.</p>
-      <div class="steer"><button id="left" aria-label="Move left">← <small>LEFT</small></button><button id="right" aria-label="Move right"><small>RIGHT</small> →</button></div>
-      <div class="controls"><button id="play" class="primary">Play</button><button id="pause" disabled>Pause</button><button id="exit" disabled>Exit</button><button id="mute" aria-pressed="false">Mute</button></div>
-      <div class="controls"><button id="retry">Retry same seed</button><button id="new">New seed</button><button id="replay" disabled>Export replay</button></div>
-      <p class="seed">Seed <output id="seed"></output> · 60 ticks / second · 120 seconds</p>
+  <canvas id="canvas" width="960" height="540" aria-label="Three-dimensional tunnel view. Steer the ship away from incoming asteroids."></canvas>
+
+  <!-- HUD: status only (spec 14). No setting or selection control lives here. -->
+  <div id="hud" aria-label="Flight status">
+    <span id="hud-score" title="ticks / 7200">0 / 7200</span>
+    <div id="hud-energy" role="meter" aria-label="Energy" aria-valuemin="0" aria-valuemax="10000" aria-valuenow="10000"><span class="bar"><i></i></span><b class="val">10000</b></div>
+    <span id="hud-lane" title="lane">2 / 3</span>
+    <span id="hud-loop" title="loop and tempo">1 / 3 · 90 BPM</span>
+    <span id="hud-weapon" title="weapon and cooldown">laser · ready</span>
+    <button id="hud-pause" type="button" aria-label="Pause">Pause</button>
+  </div>
+
+  <!-- Touch layout (spec 6.1): thumb circle bottom-right; hop arrows and red fire button bottom-left. -->
+  <div id="touch">
+    <div id="stick" role="application" aria-label="Thumb circle: steer inside the tunnel"><span class="ring"></span><span class="knob"></span></div>
+    <div id="cluster">
+      <button id="hop-left" type="button" aria-label="Hop to the left lane">&#9664;</button>
+      <button id="fire" type="button" aria-label="Fire"></button>
+      <button id="hop-right" type="button" aria-label="Hop to the right lane">&#9654;</button>
+    </div>
+  </div>
+
+  <div id="pause-overlay" role="dialog" aria-modal="true" aria-label="Paused" hidden>
+    <div class="panel">
+      <h2>Paused</h2>
+      <p>Your next tick will wait.</p>
+      <div class="row"><button id="pause-resume" type="button" class="primary">Resume</button><button id="pause-exit" type="button">Exit</button></div>
+    </div>
+  </div>
+
+  <!-- Lobby: modal, shown iff no run is in progress (spec 14). Every set-* control is a descendant. -->
+  <dialog id="lobby" aria-labelledby="lobby-title">
+    <h1 id="lobby-title">Pulse Lanes</h1>
+    <p class="eyebrow">THREE LOOP LANES · ONE RHYTHM</p>
+
+    <section aria-label="Run">
+      <div class="row"><button id="play" type="button" class="primary">Play</button><button id="retry" type="button" disabled>Retry same seed</button></div>
+      <p>Last result: <output id="last-result">No run yet.</output></p>
+      <p>Seed <output id="seed"></output> · Renderer <output id="renderer-kind">unknown</output></p>
     </section>
-    <section class="history" aria-label="Local save">
-      <h2>Your runs, on this device</h2><p id="history">No runs yet.</p>
-      <div class="controls"><button id="save">Save</button><button id="load">Load</button><button id="export">Export save</button><label class="button" for="import">Import save</label><input id="import" type="file" accept="application/json,.json"><button id="reset">New empty save</button></div>
+
+    <section aria-label="Controls help">
+      <h2>Controls</h2>
+      <ul>
+        <li>Thumb circle (bottom-right) or W A S D: steer inside the tunnel.</li>
+        <li>Left and right arrows (bottom-left, or the arrow keys): hop to the next lane. Costs more energy than steering.</li>
+        <li>Red button between the arrows, or Space: fire the current weapon.</li>
+        <li>Pause: the Pause button, Escape, or switching tabs.</li>
+      </ul>
+    </section>
+
+    <section aria-label="Settings">
+      <h2>Settings</h2>
+      <label for="set-music-level">Music level <output id="set-music-level-value">8</output></label>
+      <input id="set-music-level" type="range" min="0" max="10" step="1" value="8">
+      <label class="check"><input id="set-mute" type="checkbox"> Mute</label>
+      <label for="set-quality">Quality</label>
+      <select id="set-quality"><option value="high" selected>high</option><option value="low">low</option></select>
+      <label class="check"><input id="set-reduced-motion" type="checkbox"> Reduced motion</label>
+    </section>
+
+    <section aria-label="Local save">
+      <h2>Your runs, on this device</h2>
+      <p id="history">No runs yet.</p>
+      <div class="row">
+        <button id="save" type="button">Save</button><button id="load" type="button">Load</button>
+        <button id="export" type="button">Export save</button>
+        <label class="button" for="import">Import save</label><input id="import" type="file" accept="application/json,.json">
+        <button id="reset" type="button">New empty save</button>
+        <button id="replay" type="button" disabled>Export replay</button>
+      </div>
       <p id="notice" role="status"></p>
     </section>
-    <footer>Obstacles reach the dotted line on their scheduled tick. Move before they arrive.<br>Music and visuals never change your score. No account, samples, or external assets.</footer>
-  </main>
+
+    <footer>Music and visuals never change your score. No account, samples, or external assets.</footer>
+  </dialog>
+
   <script type="module" src="./app.js"></script>
 </body>
 </html>
