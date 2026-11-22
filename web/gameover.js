@@ -51,6 +51,11 @@ export function normalizeResult(r = {}) {
     weapon: str(r.weapon, 'laser'), seed: int(r.seed) >>> 0, ruleset: str(r.ruleset, 'pl-v2'),
     reason: str(r.reason, 'collision'), date: str(r.date, '0000-00-00'), maxTicks: int(r.maxTicks, 7200) || 7200,
     ship: shipIdOrDefault(r.ship), selfie: r.selfie ?? null,
+    // Carried through so a second normalization (modal show() then Make card) recomputes the same
+    // challenge: a plain copy of the four lobby settings, or null when r.settings is not an object.
+    settings: r.settings && typeof r.settings === 'object'
+      ? {music_level: r.settings.music_level, mute: r.settings.mute, quality: r.settings.quality,
+        reduced_motion: r.settings.reduced_motion} : null,
   };
   d.challenge = challengeFor(r, d);
   return d;
