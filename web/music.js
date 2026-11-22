@@ -26,7 +26,13 @@ export class Music {
       this.setMute(this.muted);
       this.context.addEventListener('statechange', () => this.drain());
     }
-    if (this.attempt) return;
+    if (this.attempt) {
+      // Gestures in one stack coalesce. A gesture in a later task renews the pending attempt: a
+      // resume issued outside a trusted gesture (mobile autoplay policy) may never settle, and it
+      // must not swallow the later real gesture that can start the context.
+      if (!this.attempt.fresh) this.kick(this.attempt);
+      return;
+    }
     if (this.unlocked && this.context.state === 'running' && !this.suspensions.size) {
       this.drain();
       return;
@@ -34,15 +40,23 @@ export class Music {
     this.unlock();
   }
   unlock() {
-    const attempt = {error: null};
+    const attempt = {fresh: false, open: 0, error: null};
     this.attempt = attempt;
     this.unlocked = false;
     this.unlockError = null;
-    let resume;
+    this.kick(attempt);
+  }
+  // One resume plus silent buffer for `attempt`, both in the caller's stack. An attempt may hold
+  // several kicks: the first kick that fulfills completes it; a failed kick completes it only
+  // when no other kick of the same attempt is still open.
+  kick(attempt) {
+    attempt.fresh = true;
+    queueMicrotask(() => { attempt.fresh = false; });
+    let resume, error = null;
     try {
       resume = this.context.resume();
-    } catch (error) {
-      attempt.error = String(error?.message ?? error);
+    } catch (thrown) {
+      error = String(thrown?.message ?? thrown);
     }
     // Both operations belong to the gesture stack, even if resume throws.
     try {
@@ -53,23 +67,29 @@ export class Music {
       source.connect(this.context.destination);
       source.onended = () => source.disconnect();
       source.start(0);
-    } catch (error) {
-      attempt.error = attempt.error ?? String(error?.message ?? error);
+    } catch (thrown) {
+      error = error ?? String(thrown?.message ?? thrown);
     }
+    attempt.open++;
     Promise.resolve(resume).then(
-      () => this.finishUnlock(attempt),
-      error => {
-        attempt.error = attempt.error ?? String(error?.message ?? error);
-        this.finishUnlock(attempt);
-      },
+      () => this.settleKick(attempt, error),
+      thrown => this.settleKick(attempt, error ?? String(thrown?.message ?? thrown)),
     );
   }
-  finishUnlock(attempt) {
+  settleKick(attempt, error) {
+    attempt.open--;
+    if (error !== null) {
+      attempt.error = attempt.error ?? error;
+      if (attempt.open > 0) return;
+    }
+    this.finishUnlock(attempt, error === null ? null : attempt.error);
+  }
+  finishUnlock(attempt, error) {
     // Canceled attempts cannot change the current run's success/error state.
     if (this.attempt !== attempt) return;
     this.attempt = null;
-    this.unlockError = attempt.error;
-    this.unlocked = attempt.error === null;
+    this.unlockError = error;
+    this.unlocked = error === null;
     this.drain();
   }
   setMute(muted) {
@@ -134,11 +154,13 @@ export class Music {
     this.suspensions.add(suspension);
     const settled = () => {
       this.suspensions.delete(suspension);
-      if (!this.quietMode && !this.suspensions.size) {
-        // A recovery gesture may have resumed before suspend took effect.
-        // Supersede that attempt and require a clean post-suspension unlock.
-        this.unlock();
-      }
+      if (this.quietMode || this.suspensions.size) return;
+      // A recovery gesture may have resumed before suspend took effect, so a post-suspension
+      // resume is always issued. It joins the live gesture attempt instead of superseding it:
+      // this callback runs outside any trusted gesture, so on mobile its own resume may never
+      // settle, while the gesture's resume (queued after the suspend) still reaches running.
+      if (this.attempt) this.kick(this.attempt);
+      else this.unlock();
     };
     try {
       Promise.resolve(this.context.suspend()).then(settled, settled);

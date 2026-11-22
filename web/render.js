@@ -19,6 +19,20 @@ const MAX_OFF_X = 50, MAX_OFF_Y = 60; // keeps neighbouring tubes apart (330 - 2
 const CURVE_GAIN = 8;              // world units per (curve unit * beat^2)
 const BEHIND = 70;                 // tube drawn behind the ship plane
 const CAM_BACK = 38, CAM_UP = 15, CAM_AHEAD = 90;
+// FB3-W4b R-4: minimum eye height above the ship (world units). The eye follows the ship's lateral
+// y at 0.72, so at the top of the 92-unit travel disk CAM_UP alone left it about 11 units below;
+// the floor keeps spec 12 "behind and slightly above" for every lateral offset, lane and hop.
+const CAM_MIN_ABOVE = 6;
+// FB3-W4b R-1 speed feel (presentation only; no sim state is read or written for these).
+const DEG = Math.PI / 180;
+const DESKTOP_FOVY = 66;           // deg, landscape and desktop (unchanged)
+const PORTRAIT_HALF_FOV_X = 40;    // deg, horizontal half-angle the portrait branch aims for (was 37)
+const PORTRAIT_FOVY_MAX = 112;     // deg, portrait vertical ceiling (was 100)
+const RING_DENSITY = 6;            // minor rings per beat segment on the tube wall (was 4)
+const BEAT_SURGE = 4;              // world units the chase camera surges forward on each beat
+const BEAT_BOB = 0.6;              // world units of vertical dolly bob, one cycle per beat
+const BEAT_FOV_KICK = 3;           // deg added to fovy on the beat
+const BEAT_DECAY = 6;              // per-beat exponential decay of surge and FOV kick
 const LANE_COLORS = [[1.0, 0.35, 0.85], [0.3, 0.95, 0.9], [1.0, 0.72, 0.3], [0.45, 1.0, 0.45], [0.65, 0.5, 1.0]];
 const SHAPE_COLORS = [[0.62, 0.55, 0.5], [0.55, 0.6, 0.68], [0.7, 0.5, 0.42], [0.5, 0.46, 0.42],
   [0.6, 0.56, 0.48], [0.45, 0.42, 0.46], [0.6, 0.7, 0.85], [0.66, 0.5, 0.55]];
@@ -129,6 +143,34 @@ export function createTrack(map) {
   const maxLanes = Math.max(...loops.map(L => L.lanes.length));
   return {loops, maxLanes, loopAtTick, beatsAt, sAt: T => SEG * beatsAt(T), centre, centreInt,
     laneCountAtS: s => loops[loopAtBeat(s / SEG)].lanes.length};
+}
+
+// R-2: rocket rows sampled at presentation time T. `hist` maps processed count p to a Map of
+// id -> view row [id, lane, x, y, z] (the view after tick p - 1). A rocket in the rows at
+// floor(T) or floor(T) + 1 is drawn: interpolated when in both, flying out of the muzzle when only
+// in the later row, and carried on by its own last step over the tick in which it resolved when
+// only in the earlier row (spec 12 presentation extrapolation; nothing is invented or fed back).
+export function sampleRockets(hist, T) {
+  const p0 = Math.floor(T), f = T - p0, out = [];
+  const h0 = hist.get(p0), h1 = hist.get(p0 + 1), back = hist.get(p0 - 1);
+  for (const [id, b] of h1 ?? []) {
+    const a = h0?.get(id);
+    if (a) out.push({id, lane: b[1], x: lerp(a[2], b[2], f), y: lerp(a[3], b[3], f), depth: lerp(a[4], b[4], f)});
+    else out.push({id, lane: b[1], x: b[2], y: b[3], depth: h0 ? b[4] * f : b[4]});
+  }
+  for (const [id, a] of h0 ?? []) {
+    if (h1?.has(id)) continue;
+    const prior = back?.get(id), step = prior ? a[4] - prior[4] : a[4];
+    out.push({id, lane: a[1], x: a[2], y: a[3], depth: a[4] + step * f});
+  }
+  return out;
+}
+
+// Vertical field of view (radians) for a viewport aspect w / h, before the beat kick.
+// Landscape keeps 66 deg; portrait widens to a horizontal half-angle target under a ceiling.
+export function fovyFor(aspect) {
+  if (aspect >= 1) return DESKTOP_FOVY * DEG;
+  return Math.min(PORTRAIT_FOVY_MAX * DEG, 2 * Math.atan(Math.tan(PORTRAIT_HALF_FOV_X * DEG) / aspect));
 }
 
 // ------------------------------------------------------------------ matrices (column-major)
@@ -281,7 +323,7 @@ const TUBE_FS = `#version 300 es
 precision highp float;
 in float vS; in float vAng; in float vD; in float vExist;
 uniform vec3 uColor;
-uniform float uFocus, uPulse, uVis, uSeg;
+uniform float uFocus, uPulse, uVis, uSeg, uRingDensity;
 out vec4 o;
 float fadeRange(float a, float b, float x) { float t = clamp((x - a) / (b - a), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
 float gridLine(float x, float width) {
@@ -290,7 +332,7 @@ float gridLine(float x, float width) {
   return 1.0 - fadeRange(0.0, w, d);
 }
 void main() {
-  float minor = gridLine(vS / (uSeg * 0.25), 1.1);
+  float minor = gridLine(vS * uRingDensity / uSeg, 1.1);
   float beat = gridLine(vS / uSeg, 2.2);
   float lon = gridLine(vAng * 16.0 / 6.2831853, 1.0);
   float fog = 1.0 - fadeRange(uVis * 0.45, uVis, vD);
@@ -388,7 +430,7 @@ export function createRenderer(opts = {}) {
   const compProg = program(FS_VS, COMP_FS, ['uScene', 'uBloom', 'uBloomK', 'uFlash']);
   const tubeProgs = {};
   const tubeProgram = q => (tubeProgs[q.rings] ??= program(TUBE_VS(q.rings), TUBE_FS,
-    ['uRing', 'uVP', 'uDStart', 'uDStep', 'uSShip', 'uRadius', 'uColor', 'uFocus', 'uPulse', 'uVis', 'uSeg']));
+    ['uRing', 'uVP', 'uDStart', 'uDStep', 'uSShip', 'uRadius', 'uColor', 'uFocus', 'uPulse', 'uVis', 'uSeg', 'uRingDensity']));
 
   const meshVao = data => {
     const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
@@ -476,7 +518,8 @@ export function createRenderer(opts = {}) {
   let spawnZ = Number.isFinite(opts.spawnZ) && opts.spawnZ > 0 ? opts.spawnZ : DEFAULT_SPAWN_Z;
   let observedZ = 0;
   const live = new Map();            // asteroid id -> presentation entry
-  let rocketPrev = new Map(), rocketCur = new Map(), lastView = null, lastProcessed = -1;
+  // R-2: rocket rows per processed count p (view after tick p - 1), sampled at presentation time T.
+  let rocketHist = new Map(), lastView = null, lastProcessed = -1;
   let particles = [], beams = [];
   let shipLaneF = 1, camLaneF = 1, camLaneVel = 0, shake = 0, flash = [0, 0, 0], effectTime = 0, lastNow = null;
   let lastLane = null, lastFireReady = 0, lastLocked = false, endHandled = false;
@@ -487,7 +530,7 @@ export function createRenderer(opts = {}) {
   const visDepth = () => Math.max(spawnZ, observedZ) / MU + 40;
 
   function resetRun() {
-    live.clear(); rocketPrev = new Map(); rocketCur = new Map(); lastView = null; lastProcessed = -1;
+    live.clear(); rocketHist = new Map(); lastView = null; lastProcessed = -1;
     particles = []; beams = []; shake = 0; flash = [0, 0, 0];
     lastLane = null; lastFireReady = 0; lastLocked = false; endHandled = false;
   }
@@ -501,10 +544,13 @@ export function createRenderer(opts = {}) {
     }
   }
 
-  function syncView(view, p, prev, curr) {
+  // `trail` (optional) is app.js's per-tick list of {p, state, view} rows, oldest first. Every
+  // tick since the last sync is consumed, so a frame that ran several ticks loses no fire and
+  // no short-lived rocket row (the FB3 owner report of intermittent weapons).
+  function syncView(view, p, prev, curr, trail) {
     if (!view || view === lastView) return;
     lastView = view;
-    const seen = new Set();
+    const seen = new Set(), hits = [];
     for (const a of view.asteroids ?? []) {
       const [id, , , z, hp] = a, row = course[id];
       if (!row) continue;
@@ -513,26 +559,47 @@ export function createRenderer(opts = {}) {
       let e = live.get(id);
       if (!e) { e = {id, row, speed: 0, hp, flash: 0, passing: false, pos: [0, 0, 0], axis: null}; live.set(id, e); }
       if (row[3] > p) e.speed = z / (row[3] - p);
-      if (hp < e.hp) { e.flash = 1; e.hitAt = effectTime; }
+      if (hp < e.hp) { e.flash = 1; e.hitAt = effectTime; hits.push({lane: row[2], target: e, end: null}); }
       e.hp = hp;
     }
     for (const [id, e] of live) {
       if (seen.has(id) || e.passing) continue;
       if (e.row[3] < p) e.passing = true;
-      else { explode(e.pos, [1, 0.7, 0.35], 26, 90, e.row[6] / MU * 0.18); live.delete(id); }
+      else {
+        hits.push({lane: e.row[2], target: null, end: [...e.pos]});
+        explode(e.pos, [1, 0.7, 0.35], 26, 90, e.row[6] / MU * 0.18); live.delete(id);
+      }
     }
-    rocketPrev = rocketCur;
-    rocketCur = new Map((view.rockets ?? []).map(r => [r[0], r]));
+    const rows = Array.isArray(trail) && trail.length ? trail : [{p, state: curr, view}];
+    for (const entry of rows) {
+      if (!entry?.view || entry.p <= lastProcessed && rocketHist.has(entry.p)) continue;
+      rocketHist.set(entry.p, new Map((entry.view.rockets ?? []).map(r => [r[0], r])));
+    }
+    for (const k of rocketHist.keys()) if (k < p - 32) rocketHist.delete(k);
     if (curr && prev && curr.processed !== lastProcessed) {
-      lastProcessed = curr.processed;
-      if (curr.fire_ready !== lastFireReady && curr.fire_ready > prev.fire_ready) {
-        const weapon = track.loops[track.loopAtTick(Math.max(0, curr.processed - 1))]?.weapon ?? curr.weapon;
-        let target = null;
-        for (const e of live.values()) if (e.row[2] === curr.lane && e.hitAt === effectTime && !e.passing) target = e;
-        beams.push({weapon, life: 0, max: weapon === 'laser' ? 0.14 : 0.2, target, length: weapon === 'laser' ? 240 : 0});
+      // fire_ready only moves when a shot is accepted (tick t sets it to t + cooldown), so a rise
+      // against the last seen value marks exactly one fire tick: the [t, 3, code, shots] event.
+      for (const entry of rows) {
+        const s = entry?.state;
+        if (!s || entry.p <= lastProcessed || !(s.fire_ready > lastFireReady)) continue;
+        lastFireReady = s.fire_ready;
+        const fireTick = Math.max(0, entry.p - 1);
+        const weapon = track.loops[track.loopAtTick(fireTick)]?.weapon ?? s.weapon;
+        // Same-tick resolves: the nearest hit in the firing lane this sync (live or just destroyed).
+        let best = null;
+        const before = rocketHist.get(entry.p - 1);
+        const launched = weapon !== 'laser' && (entry.view?.rockets ?? []).some(r => !before?.has(r[0]));
+        for (const h of launched ? [] : hits) {
+          if (h.lane !== s.lane) continue;
+          const z = h.target ? h.target.pos[2] : h.end[2];
+          if (!best || z > best.z) best = {...h, z};
+        }
+        beams.push({weapon, life: 0, max: weapon === 'laser' ? 0.2 : 0.24, target: best?.target ?? null, end: best?.end ?? null,
+          length: weapon === 'laser' ? 240 : 0});
         if (!settings.reduced_motion) shake = Math.max(shake, weapon === 'laser' ? 0.05 : 0.12);
       }
-      lastFireReady = curr.fire_ready;
+      lastFireReady = Math.max(lastFireReady, curr.fire_ready);
+      lastProcessed = curr.processed;
       if (lastLane !== null && curr.lane !== lastLane && !settings.reduced_motion) shake = Math.max(shake, 0.12);
       lastLane = curr.lane;
       const locked = curr.locked_until > curr.processed;
@@ -582,7 +649,7 @@ export function createRenderer(opts = {}) {
       sy = lerp(prev.position[1], curr.position[1], a) / MU;
       vx = lerp(prev.velocity[0], curr.velocity[0], a);
       lane = curr.lane;
-      syncView(frame.view, curr.processed, prev, curr);
+      syncView(frame.view, curr.processed, prev, curr, frame.trail);
       if (curr.status === 'ended' && !endHandled) {
         endHandled = true;
         if (curr.terminal_reason === 'collision') {
@@ -608,18 +675,29 @@ export function createRenderer(opts = {}) {
     camLaneF += (lane - camLaneF) * (dtReal > 0 ? kCam : 1);
     camLaneVel = dtReal > 0 ? (camLaneF - before) / dtReal : 0;
 
+    // ---- beat-locked motion cues (R-1): float envelope of the presentation beat phase only
+    const beat = track.beatsAt(T);
+    const beatPhase = beat - Math.floor(beat);
+    const beatKick = reduced ? 0 : Math.exp(-beatPhase * BEAT_DECAY);
+    const camBack = CAM_BACK - BEAT_SURGE * beatKick;
+    const bob = reduced ? 0 : BEAT_BOB * Math.sin(beatPhase * 2 * Math.PI);
+
     // ---- camera
-    const cBack = track.centre(camLaneF, sShip - CAM_BACK, [0, 0, 0]);
+    const cBack = track.centre(camLaneF, sShip - camBack, [0, 0, 0]);
     const cAhead = track.centre(camLaneF, sShip + CAM_AHEAD, [0, 0, 0]);
     shake *= Math.exp(-dt * 4.5);
     const jx = reduced ? 0 : shake * 3.2 * Math.sin(effectTime * 41), jy = reduced ? 0 : shake * 3.2 * Math.sin(effectTime * 37 + 1.3);
-    const eye = [cBack[0] + sx * 0.72 + jx, cBack[1] + sy * 0.72 + CAM_UP + jy, CAM_BACK];
+    const eye = [cBack[0] + sx * 0.72 + jx, cBack[1] + sy * 0.72 + CAM_UP + jy + bob, camBack];
+    // R-4: floor the eye above the ship. The ship is drawn on the smoothed lane and the sim lane is
+    // its hop target; the higher of the two centrelines is the reference, so a hop never dips it.
+    const shipY = Math.max(track.centre(shipLaneF, sShip, cA)[1], track.centre(lane, sShip, cB)[1]) + sy;
+    eye[1] = Math.max(eye[1], shipY + CAM_MIN_ABOVE);
     const target = [cAhead[0] + sx * 0.45 + jx * 0.5, cAhead[1] + sy * 0.45 + 5 + jy * 0.5, -CAM_AHEAD];
     const roll = reduced ? 0 : clamp(camLaneVel * 0.045 + vx / 3750 * 0.1, -0.3, 0.3);
     const fwd = normalize([target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]]);
     const R = axisAngle(fwd, roll), up = [R[1][0], R[1][1], R[1][2]];
     const aspect = w / h;
-    const fovy = aspect >= 1 ? 66 * Math.PI / 180 : Math.min(100 * Math.PI / 180, 2 * Math.atan(Math.tan(37 * Math.PI / 180) / aspect));
+    const fovy = fovyFor(aspect) + BEAT_FOV_KICK * DEG * beatKick;
     const vis = visDepth();
     perspective(P, fovy, aspect, 0.5, vis + CAM_BACK + 200);
     lookAt(V, eye, target, up);
@@ -699,8 +777,8 @@ export function createRenderer(opts = {}) {
     const dStart = -BEHIND, dStep = (vis + 20 - dStart) / (quality.rings - 1);
     gl.uniform1f(tp.u.uDStart, dStart); gl.uniform1f(tp.u.uDStep, dStep); gl.uniform1f(tp.u.uSShip, sShip);
     gl.uniform1f(tp.u.uRadius, TUBE_R); gl.uniform1f(tp.u.uVis, vis); gl.uniform1f(tp.u.uSeg, SEG);
-    const beat = track.beatsAt(T);
-    gl.uniform1f(tp.u.uPulse, Math.exp(-(beat - Math.floor(beat)) * 5));
+    gl.uniform1f(tp.u.uRingDensity, RING_DENSITY);
+    gl.uniform1f(tp.u.uPulse, Math.exp(-beatPhase * 5));
     gl.bindVertexArray(tube.vao);
     for (let j = 0; j < track.maxLanes; j++) {
       let any = false;
@@ -723,32 +801,40 @@ export function createRenderer(opts = {}) {
       modelBasis(M, [shipPos[0], shipPos[1], 5.2], [1, 0, 0], [0, 1, 0], [0, 0, 1], 1.6 * g, 1.1 * g, 2.6 * g);
       drawMesh(octa, M, zero, [0.25, 0.85, 1.0]);
     }
-    const a = clamp(Number(frame.alpha) || 0, 0, 1);
-    for (const [id, r] of rocketCur) {
-      const before = rocketPrev.get(id);
-      const depth = lerp(before ? before[4] : 0, r[4], a) / MU;
-      track.centreInt(r[1], sShip + depth, cA);
-      modelBasis(M, [cA[0] + r[2] / MU, cA[1] + r[3] / MU, -depth], [1, 0, 0], [0, 1, 0], [0, 0, 1], 1.4, 1.4, 4.5);
-      drawMesh(octa, M, zero, [1.0, 0.55, 0.15]);
-      modelBasis(M, [cA[0] + r[2] / MU, cA[1] + r[3] / MU, -depth + 7], [1, 0, 0], [0, 1, 0], [0, 0, 1], 0.9, 0.9, 6);
-      drawMesh(octa, M, zero, [0.5, 0.18, 0.05]);
+    // Rockets at presentation time T (same clock as ship and asteroids), every frame until resolved.
+    for (const r of curr ? sampleRockets(rocketHist, T) : []) {
+      const depth = r.depth / MU;
+      track.centreInt(r.lane, sShip + depth, cA);
+      const px = cA[0] + r.x / MU, py = cA[1] + r.y / MU;
+      modelBasis(M, [px, py, -depth], [1, 0, 0], [0, 1, 0], [0, 0, 1], 1.8, 1.8, 5);
+      drawMesh(octa, M, zero, [1.3, 0.7, 0.2]);
+      modelBasis(M, [px, py, -depth + 9], [1, 0, 0], [0, 1, 0], [0, 0, 1], 1.1, 1.1, 8);
+      drawMesh(octa, M, zero, [0.6, 0.22, 0.06]);
     }
     beams = beams.filter(b => (b.life += dt) < b.max);
     for (const b of beams) {
       if (!shipPos) break;
       const fade = 1 - b.life / b.max;
-      if (b.weapon === 'laser') {
-        const end = b.target && live.has(b.target.id) ? b.target.pos : null;
+      const end = b.target && live.has(b.target.id) ? b.target.pos : b.end;
+      const laser = b.weapon === 'laser';
+      if (laser) {
+        // Laser muzzle flash at the nose, so a same-tick hitscan resolve is always seen.
+        modelBasis(M, [shipPos[0], shipPos[1], -12], [1, 0, 0], [0, 1, 0], [0, 0, 1], 2.2 * fade + 0.6);
+        drawMesh(octa, M, zero, [1.4 * fade, 0.3 * fade, 0.4 * fade]);
+      } else {
+        modelBasis(M, [shipPos[0], shipPos[1], -6], [1, 0, 0], [0, 1, 0], [0, 0, 1], 3 * fade + 0.5);
+        drawMesh(octa, M, zero, [1.2 * fade, 0.6 * fade, 0.2 * fade]);
+      }
+      // Laser: beam always (hitscan). Rocket: a streak only when it resolved before any row showed it.
+      if (laser || end) {
         const len = end ? Math.max(4, -end[2]) : b.length;
         const ex = end ? end[0] : track.centre(shipLaneF, sShip + len, cB)[0] + sx, ey = end ? end[1] : cB[1] + sy;
         const mid = [(shipPos[0] + ex) / 2, (shipPos[1] + ey) / 2, -len / 2];
         const zf = normalize([ex - shipPos[0], ey - shipPos[1], -len]);
         const xr = normalize(cross(zf, [0, 1, 0])), yr = cross(xr, zf);
-        modelBasis(M, mid, xr, yr, zf, 0.55 * fade + 0.15, 0.55 * fade + 0.15, len / 2);
-        drawMesh(octa, M, zero, [1.6 * fade, 0.25 * fade, 0.35 * fade]);
-      } else {
-        modelBasis(M, [shipPos[0], shipPos[1], -6], [1, 0, 0], [0, 1, 0], [0, 0, 1], 3 * fade + 0.5);
-        drawMesh(octa, M, zero, [1.2 * fade, 0.6 * fade, 0.2 * fade]);
+        const k = laser ? 0.55 : 0.9;
+        modelBasis(M, mid, xr, yr, zf, k * fade + 0.15, k * fade + 0.15, len / 2);
+        drawMesh(octa, M, zero, laser ? [1.6 * fade, 0.25 * fade, 0.35 * fade] : [1.3 * fade, 0.6 * fade, 0.15 * fade]);
       }
     }
     particles = particles.filter(q => (q.life += dt) < q.max);

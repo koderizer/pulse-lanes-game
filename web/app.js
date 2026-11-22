@@ -31,6 +31,11 @@ let save = null, session = null, game = null, map = null, course = [], view = EM
 let prevState = null, currState = null, lastRun = null, lastSeed = null, seed = randomSeed();
 let running = false, recorded = false, accumulator = 0, previousFrame = null, lastActive = Date.now();
 let hops = [], fires = 0, lastSent = [0, 0];
+// Per-tick {p, state, view} rows already produced by step/view, newest last (presentation only).
+// A frame that runs several ticks hands all of them to the renderer, so no fire or short-lived
+// rocket row is lost between frames.
+const TRAIL_TICKS = 24;
+let trail = [];
 const held = {w: false, a: false, s: false, d: false};
 let stickPointer = null, touchStick = [0, 0];
 
@@ -160,6 +165,7 @@ function start(nextSeed) {
   lastSeed = nextSeed;
   game = createGame(nextSeed); map = game.map(); course = game.course();
   prevState = currState = game.state(); view = game.view();
+  trail = [{p: currState.processed, state: currState, view}];
   recorded = false; running = true; hops = []; fires = 0; lastSent = [0, 0];
   accumulator = 0; previousFrame = null;
   music.reset(); voice.setMap(map);
@@ -213,6 +219,8 @@ function tickOnce() {
   prevState = currState;
   currState = game.step(1, entries);
   view = game.view();
+  trail.push({p: currState.processed, state: currState, view});
+  if (trail.length > TRAIL_TICKS) trail.shift();
   session.active_ticks += currState.processed - t;
   lastActive = Date.now();
   music.beat(t);
@@ -229,7 +237,7 @@ function frame(timestamp) {
   } else previousFrame = null;
   const ended = currState?.status === 'ended';
   const rows = currState
-    ? {prev: prevState, curr: currState, alpha: ended ? 1 : accumulator / TICK_MS, view, paused: pause.isPaused() || !running, now: timestamp}
+    ? {prev: prevState, curr: currState, alpha: ended ? 1 : accumulator / TICK_MS, view, trail, paused: pause.isPaused() || !running, now: timestamp}
     : {cruise: timestamp / 1000, now: timestamp};
   try { renderer.draw(rows); }
   catch (err) {
