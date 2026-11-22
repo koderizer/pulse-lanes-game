@@ -3,6 +3,8 @@
 // save, storage or the network. All DOM is created here with createElement and textContent
 // (no innerHTML from run data); index.html carries no markup for it.
 import {shipById, shipIdOrDefault, traceOutline, outlineBounds, hexRgb} from './ships.js';
+import {qrMatrix} from './qr.js';
+import {encodeChallenge} from './challenge.js';
 
 // Tier thresholds over the final score (survived ticks, 0..7200). Each loop section lasts
 // 2400 ticks, so a tier marks how far into the course the run got: SILVER reached loop 2,
@@ -33,12 +35,16 @@ export function flavorText(reason, loops) {
 }
 
 // Plain-number summary from the client loop: {score, ticks, tps, loops, loopCount, lanes, lane,
-// weapon, seed, ruleset, reason, date, maxTicks, ship}. Anything malformed falls back to a safe
-// value; an unknown or missing ship id becomes SHIP_DEFAULT (ships.js).
+// weapon, seed, ruleset, reason, date, maxTicks, ship, settings}. Anything malformed falls back
+// to a safe value; an unknown or missing ship id becomes SHIP_DEFAULT (ships.js).
+// FB3-QR R-3: `settings` ({music_level, mute, quality, reduced_motion}, the lobby settings the run
+// was played with) plus the raw seed give the challenge code. Missing or invalid data gives
+// challenge null (the card is drawn without a QR); it never throws.
 export function normalizeResult(r = {}) {
+  r = r && typeof r === 'object' ? r : {};
   const int = (v, d = 0) => (Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : d);
   const str = (v, d) => (typeof v === 'string' && v ? v : d);
-  return {
+  const d = {
     score: int(r.score), ticks: int(r.ticks, int(r.score)), tps: int(r.tps, 60) || 60,
     loops: int(r.loops, 1) || 1, loopCount: int(r.loopCount, 3) || 3,
     lanes: Math.min(8, Math.max(1, int(r.lanes, 3))), lane: int(r.lane, 1),
@@ -46,6 +52,18 @@ export function normalizeResult(r = {}) {
     reason: str(r.reason, 'collision'), date: str(r.date, '0000-00-00'), maxTicks: int(r.maxTicks, 7200) || 7200,
     ship: shipIdOrDefault(r.ship), selfie: r.selfie ?? null,
   };
+  d.challenge = challengeFor(r, d);
+  return d;
+}
+
+// The PLR1 code of this run (challenge.js), or null when any needed value is missing/invalid.
+export function challengeFor(r, d) {
+  try {
+    const s = r.settings;
+    if (!s || typeof s !== 'object' || !Number.isInteger(r.seed) || !Number.isInteger(r.score)) return null;
+    return encodeChallenge({seed: r.seed, ship: d.ship, ruleset: d.ruleset, music_level: s.music_level, mute: s.mute,
+      quality: s.quality, reduced_motion: s.reduced_motion, score: d.score, loops: d.loops, time: formatTime(d.ticks, d.tps)});
+  } catch { return null; }
 }
 
 // ------------------------------------------------------------------ achievement card (GO-2)
@@ -407,7 +425,7 @@ function panel(ctx, x, y, w, h, style) {
   ctx.lineWidth = 2; ctx.strokeStyle = rgba(style.glow, 0.5); ctx.stroke();
 }
 
-function drawStats(ctx, d, tier, style) {
+function drawStats(ctx, d, style) {
   const top = 870, h = 186;
   panel(ctx, 66, top, 486, h, style);
   text(ctx, 'SCORE', 92, top + 42, {font: `700 26px ${MONO}`, color: rgba(style.glow, 1)});
@@ -424,6 +442,10 @@ function drawStats(ctx, d, tier, style) {
     text(ctx, label, cx + 108, top + 42, {font: `700 26px ${MONO}`, color: rgba(style.glow, 1), align: 'center'});
     text(ctx, value, cx + 108, top + 136, {font: `800 64px ${MONO}`, color: '#eef1ff', align: 'center', max: 196});
   }
+}
+
+// Footer without a challenge QR (the GO-2 layout, unchanged).
+function drawFooter(ctx, d, tier, style) {
   text(ctx, `“${flavorText(d.reason, d.loops)}”`, CARD_W / 2, 1110, {font: `italic 500 32px ${FONT}`, color: '#cfd6f2', align: 'center', max: 940});
   const rule = ctx.createLinearGradient(80, 0, CARD_W - 80, 0);
   rule.addColorStop(0, rgba(style.glow, 0)); rule.addColorStop(0.5, rgba(style.glow, 0.9)); rule.addColorStop(1, rgba(style.glow, 0));
@@ -441,9 +463,72 @@ function drawStats(ctx, d, tier, style) {
   text(ctx, `No.${d.seed.toString(16).padStart(8, '0').toUpperCase()}`, 70, 1296, {font: `600 18px ${MONO}`, color: '#59617f'});
 }
 
+// FB3-QR R-3: challenge QR, bottom right. The matrix rows already carry the 4-module light quiet
+// zone, so the white panel is exactly size x size modules; dark modules are drawn as
+// pixel-snapped horizontal runs in black. A tier foil frame with a glow sits outside the panel.
+export const QR_PANEL = Object.freeze({x: 776, y: 1068, s: 238});
+function drawQr(ctx, qr, style) {
+  const {x, y, s} = QR_PANEL;
+  ctx.save();
+  ctx.shadowColor = rgba(style.glow, 0.75); ctx.shadowBlur = 26;
+  roundRect(ctx, x - 8, y - 8, s + 16, s + 16, 14);
+  ctx.fillStyle = foil(ctx, style, x, y, x + s, y + s); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(x, y, s, s);
+  ctx.fillStyle = '#000000';
+  const edge = (o, i) => Math.round(o + i * s / qr.size);
+  qr.modules.forEach((row, r) => {
+    const y0 = edge(y, r), y1 = edge(y, r + 1);
+    for (let c = 0; c < row.length; c++) {
+      if (row[c] !== '1') continue;
+      let e = c;
+      while (e + 1 < row.length && row[e + 1] === '1') e++;
+      const x0 = edge(x, c);
+      ctx.fillRect(x0, y0, edge(x, e + 1) - x0, y1 - y0);
+      c = e;
+    }
+  });
+}
+
+// Footer with the QR: the label and the result to beat on the left, beside the code, then the
+// flavor line, run data and the tier row in a narrower left column.
+function drawChallengeFooter(ctx, d, tier, style) {
+  const left = 80, width = 660;
+  const ink = ctx.createLinearGradient(0, 1074, 0, 1110);
+  ink.addColorStop(0, '#ffffff'); ink.addColorStop(1, style.ink);
+  ctx.save();
+  ctx.shadowColor = rgba(style.glow, 0.7); ctx.shadowBlur = 18;
+  text(ctx, 'SCAN TO CHALLENGE', left, 1108, {font: `italic 900 46px ${FONT}`, color: ink, max: width});
+  ctx.restore();
+  text(ctx, `BEAT ${d.score}   ·   SEED ${d.seed}`, left, 1150, {font: `700 28px ${MONO}`, color: rgba(style.glow, 1), max: width});
+  text(ctx, `“${flavorText(d.reason, d.loops)}”`, left, 1194, {font: `italic 500 23px ${FONT}`, color: '#cfd6f2', max: width});
+  const rule = ctx.createLinearGradient(left, 0, left + width, 0);
+  rule.addColorStop(0, rgba(style.glow, 0.9)); rule.addColorStop(1, rgba(style.glow, 0));
+  ctx.fillStyle = rule; ctx.fillRect(left, 1214, width, 2);
+  text(ctx, `${d.ruleset}   ·   ${d.date} UTC   ·   No.${d.seed.toString(16).padStart(8, '0').toUpperCase()}`, left, 1250,
+    {font: `700 24px ${MONO}`, color: '#69e2d3', max: width});
+  [...TIERS].reverse().forEach((t, i) => {
+    const x = left + i * 168, lit = t.name === tier.name;
+    const label = t.min >= d.maxTicks ? `${t.name} ${t.min}` : `${t.name} ${t.min}+`;
+    text(ctx, label, x, 1284, {font: `${lit ? 800 : 600} 20px ${MONO}`, color: lit ? style.ink : '#6f7899', max: 160});
+    if (lit) { ctx.fillStyle = style.ink; ctx.fillRect(x, 1293, 100, 3); }
+  });
+  text(ctx, 'TIERS BY SCORE (SURVIVED TICKS)', left, 1312, {font: `600 15px ${MONO}`, color: '#59617f', max: width});
+}
+
+function cardQr(d) {
+  if (!d.challenge) return null;
+  try {
+    const m = qrMatrix(d.challenge);
+    return m && m.size > 0 && Array.isArray(m.modules) && m.modules.length === m.size ? m : null;
+  } catch { return null; }
+}
+
 export function renderCard(ctx, data) {
   const d = normalizeResult(data);
   const tier = tierFor(d.score), style = TIER_STYLE[tier.name], rng = seededRng(d.seed);
+  const qr = cardQr(d);
   ctx.save();
   ctx.clearRect(0, 0, CARD_W, CARD_H);
   drawFrame(ctx, style, rng);
@@ -451,9 +536,11 @@ export function renderCard(ctx, data) {
   const portrait = d.selfie ? drawPortrait(ctx, d.selfie, style) : false;
   drawHeader(ctx, style);
   drawBadge(ctx, tier, style);
-  drawStats(ctx, d, tier, style);
+  drawStats(ctx, d, style);
+  if (qr) { drawQr(ctx, qr, style); drawChallengeFooter(ctx, d, tier, style); } else drawFooter(ctx, d, tier, style);
   ctx.restore();
-  return {tier: tier.name, time: formatTime(d.ticks, d.tps), portrait, ship: d.ship};
+  return {tier: tier.name, time: formatTime(d.ticks, d.tps), portrait, ship: d.ship,
+    qr: qr ? {text: d.challenge, version: qr.version, size: qr.size, ...QR_PANEL} : null};
 }
 
 // Icons reuse the lobby stroke style. The SVG namespace is read from an inline SVG already in the
@@ -547,7 +634,7 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
     const ctx = canvas.getContext('2d');
     if (!ctx) { setHint('This browser cannot draw the card.'); return null; }
     card = renderCard(ctx, {...result, selfie});
-    canvas.setAttribute('aria-label', `Achievement card: ${card.tier}, score ${result.score}, time ${card.time}, seed ${result.seed}`);
+    canvas.setAttribute('aria-label', `Achievement card: ${card.tier}, score ${result.score}, time ${card.time}, seed ${result.seed}${card.qr ? ', with challenge QR' : ''}`);
     blobPromise = null;
     pngBlob(); // encode now so Share can call navigator.share while the tap still counts as a gesture
     return card;

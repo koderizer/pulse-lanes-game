@@ -14,6 +14,7 @@ import {createRenderer} from './render.js';
 import {createRenderer2d} from './render2d.js';
 import {createGameOver, drawShipPlan} from './gameover.js';
 import {SHIPS, SHIP_KEY, shipIdOrDefault, outlineBounds} from './ships.js';
+import {applyChallenge, createScanOverlay} from './challenge.js';
 
 const BUILD = 'pl-web-0.2.0';
 // Spec section 2 SPAWN_Z (mu). The sim module keeps this constant private, so it is handed to the
@@ -45,6 +46,8 @@ let stickPointer = null, touchStick = [0, 0];
 // Ship model (spec 19, ruling R33): the lobby choice, and the model locked in when a run starts
 // (that one goes on the card). Presentation only; the sim never sees it.
 let shipId = shipIdOrDefault(null), runShip = shipId;
+// FB3-QR R-3: the lobby settings a run started with, for the card's challenge code.
+let runSettings = null;
 
 // ------------------------------------------------------------------ renderer selection (spec 12)
 let renderer = null, rendererKind = 'unknown';
@@ -197,6 +200,62 @@ function buildShipPicker() {
   showShip();
 }
 
+// Challenge scan (spec 20 QR-3/QR-4, ruling R33). The Scan button, the banner and the scan
+// overlay are built here and in challenge.js, never in index.html. A decoded code presets the
+// lobby through the same paths as manual configuration: changeSetting (persist + music and
+// renderer setters), chooseShip (pl-ship + setShip) and the seed the next Play starts. The run
+// is then played and scored normally; nothing else changes. Camera frames stay in the page.
+let challenge = null, challengeBanner = null, scanner = null;
+function showChallenge() {
+  if (!challengeBanner) return;
+  challengeBanner.hidden = !challenge;
+  challengeBanner.textContent = challenge?.text ?? '';
+}
+const lobbyPort = {
+  changeSetting: (key, value) => changeSetting(key, value),
+  chooseShip: id => chooseShip(id),
+  setSeed: next => { seed = next >>> 0; updateLobby(); },
+  setChallenge: c => { challenge = c; showChallenge(); },
+};
+function onChallenge(config, result) {
+  if (!save) notice('Import a valid save or choose New empty save before playing the challenge.');
+  applyChallenge(config, lobbyPort);
+  notice(result.warnings.length ? `Challenge loaded. ${config.ship_requested} is not in this build; flying ${config.ship.toUpperCase()}.`
+    : 'Challenge loaded. Press Play to fly it.');
+  $('play').focus?.();
+}
+function buildChallengeUi() {
+  const svgNs = lobby.querySelector('svg')?.namespaceURI ?? null;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.id = 'scan';
+  b.className = 'icon scan-open';
+  b.title = 'Scan challenge';
+  b.setAttribute('aria-label', 'Scan challenge');
+  if (svgNs) {
+    const svg = document.createElementNS(svgNs, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true'); svg.setAttribute('focusable', 'false');
+    for (const d of ['M4 9V4h5', 'M15 4h5v5', 'M20 15v5h-5', 'M9 20H4v-5', 'M9 9h2v2H9z', 'M13 13h2v2h-2z', 'M13 9h2', 'M9 15h2']) {
+      const p = document.createElementNS(svgNs, 'path'); p.setAttribute('d', d); svg.append(p);
+    }
+    b.append(svg);
+  }
+  const label = document.createElement('span');
+  label.textContent = 'Scan';
+  b.append(label);
+  const launch = lobby.querySelector('.launch');
+  launch.append(b);
+  challengeBanner = document.createElement('p');
+  challengeBanner.className = 'challenge-banner';
+  challengeBanner.setAttribute('role', 'status');
+  challengeBanner.hidden = true;
+  launch.before(challengeBanner);
+  scanner = createScanOverlay({document, navigator, BarcodeDetector: globalThis.BarcodeDetector,
+    requestFrame: cb => requestAnimationFrame(cb), cancelFrame: id => cancelAnimationFrame(id),
+    onApply: onChallenge, onClose: () => b.focus?.()});
+  b.addEventListener('click', () => scanner.open());
+}
+
 // Game over (spec 18 GO-1, ruling R31): a finished run shows this modal first; Back to lobby
 // (or Escape) dismisses it and opens the lobby exactly as before. No run is in progress while
 // it is open. Idle timeouts leave an open game over modal in place instead of yanking it.
@@ -225,6 +284,8 @@ $(SETTING_CONTROLS.reduced_motion).addEventListener('change', event => changeSet
 function start(nextSeed) {
   if (!save) return notice('Import a valid save or choose New empty save before playing.');
   if (running) stopRun();
+  // A challenge banner stays while its seed is played (Play, then Retry); any other seed ends it.
+  if (challenge && nextSeed !== challenge.seed) { challenge = null; showChallenge(); }
   lastSeed = nextSeed;
   game = createGame(nextSeed); map = game.map(); course = game.course();
   prevState = currState = game.state(); view = game.view();
@@ -235,6 +296,7 @@ function start(nextSeed) {
   beginSession(); music.gesture(); persist();
   renderer.setCourse(map, course);
   runShip = shipId; renderer.setShip?.(runShip);
+  runSettings = {...settingsNow()};
   applySettingsToOutputs();
   pause.runStarted();
   closeLobby();
@@ -249,6 +311,7 @@ function finishRun() {
     score: s.score, ticks: s.terminal_tick, tps: TICKS_PER_SECOND, maxTicks: MAX_TICKS,
     loops: s.loop + 1, loopCount: map?.loops?.length ?? 3, lanes: s.lane_count, lane: s.lane, weapon: s.weapon,
     seed: s.seed, ruleset: s.ruleset_id, reason: s.terminal_reason, date: now().slice(0, 10), ship: runShip,
+    settings: runSettings ?? {...settingsNow()},
   });
 }
 
@@ -403,10 +466,10 @@ document.addEventListener('pointerdown', () => music.gesture(), {once: true});
 document.addEventListener('keydown', () => music.gesture(), {once: true});
 document.addEventListener('visibilitychange', () => {
   previousFrame = null; accumulator = 0;
-  if (document.hidden) music.quiet();
+  if (document.hidden) { music.quiet(); scanner?.close(); } // a hidden page never keeps the camera open
   else if (session && Date.now() - lastActive >= IDLE_MS) { endSession(); openLobbyUnlessGameOver(); }
 });
-window.addEventListener('pagehide', () => endSession());
+window.addEventListener('pagehide', () => { scanner?.close(); endSession(); });
 setInterval(() => {
   if (session && Date.now() - lastActive >= IDLE_MS) { endSession(); openLobbyUnlessGameOver(); notice('Session ended after five minutes without active play.'); }
 }, 1000);
@@ -423,6 +486,7 @@ try {
 } catch { save = newSave(crypto.randomUUID()); notice('Local storage unavailable. Use Export save to keep your runs.'); }
 shipId = runShip = loadShip(); // before the renderer exists, so the first frame shows the chosen ship
 buildShipPicker();
+buildChallengeUi();
 initRenderer();
 // Lobby backdrop: the course of the shown seed, cruising without asteroids (presentation only).
 map = createGame(seed).map();
