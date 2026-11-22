@@ -2,9 +2,10 @@
 // fix of the same build appends -fbN. W4/W5 append their render and loop modules to ASSETS
 // when those files exist (cache.addAll fails the whole install on a single 404).
 // FB3-W4c R-3 (ruling R29, closes queued W5): -fb3 key; render.js, render2d.js and sfx.js precached.
-const CACHE = 'pulse-lanes-pl-web-0.2.0-fb3';
+// FB3-ACH R-5 (ruling R31, spec 18 GO-5): -fb4 key; gameover.js precached.
+const CACHE = 'pulse-lanes-pl-web-0.2.0-fb4';
 const ASSETS = ['./', './index.html', './lobby.css', './app.js', './digest.js', './music.js', './score_voice.js',
-  './lobby_model.js', './hud.js', './pause.js', './render.js', './render2d.js', './sfx.js',
+  './lobby_model.js', './hud.js', './pause.js', './render.js', './render2d.js', './sfx.js', './gameover.js',
   '../src/sim/space_racer.js', '../src/input/controls.js',
   '../src/sim/pulse_lanes.js', '../src/state/pilot_state.js', '../src/shared/strict_json.js',
   '../release/supported_builds.json'];

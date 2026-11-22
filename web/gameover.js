@@ -1,0 +1,630 @@
+// Game over flow (spec section 18 GO-1..GO-4, ruling R31). Presentation only: this module reads
+// one finished-run summary row handed over by the client loop and never touches the sim, the
+// save, storage or the network. All DOM is created here with createElement and textContent
+// (no innerHTML from run data); index.html carries no markup for it.
+
+// Tier thresholds over the final score (survived ticks, 0..7200). Each loop section lasts
+// 2400 ticks, so a tier marks how far into the course the run got: SILVER reached loop 2,
+// GOLD reached loop 3, MYTHIC cleared the whole course. Highest first.
+export const TIERS = Object.freeze([
+  Object.freeze({name: 'MYTHIC', min: 7200}),
+  Object.freeze({name: 'GOLD', min: 4800}),
+  Object.freeze({name: 'SILVER', min: 2400}),
+  Object.freeze({name: 'BRONZE', min: 0}),
+]);
+export function tierFor(score) { return TIERS.find(t => score >= t.min) ?? TIERS[TIERS.length - 1]; }
+
+// mm:ss from ticks. `tps` is the sim TICKS_PER_SECOND, handed in by the client loop.
+export function formatTime(ticks, tps) {
+  const total = Number.isFinite(ticks) && ticks > 0 && tps > 0 ? Math.floor(ticks / tps) : 0;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+const HEADLINES = {
+  collision: ['Hull breach', 'Game over'],
+  complete: ['Course clear', 'Run complete'],
+  abandoned: ['Signal lost', 'Run ended'],
+};
+export function flavorText(reason, loops) {
+  if (reason === 'complete') return 'All three loops cleared. The pulse bows to you.';
+  if (reason === 'collision') return `An asteroid found your hull in loop ${loops}. The tunnel keeps the score.`;
+  return 'You pulled out of the tunnel early. The lanes will wait.';
+}
+
+// Plain-number summary from the client loop: {score, ticks, tps, loops, loopCount, lanes, lane,
+// weapon, seed, ruleset, reason, date, maxTicks}. Anything malformed falls back to a safe value.
+export function normalizeResult(r = {}) {
+  const int = (v, d = 0) => (Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : d);
+  const str = (v, d) => (typeof v === 'string' && v ? v : d);
+  return {
+    score: int(r.score), ticks: int(r.ticks, int(r.score)), tps: int(r.tps, 60) || 60,
+    loops: int(r.loops, 1) || 1, loopCount: int(r.loopCount, 3) || 3,
+    lanes: Math.min(8, Math.max(1, int(r.lanes, 3))), lane: int(r.lane, 1),
+    weapon: str(r.weapon, 'laser'), seed: int(r.seed) >>> 0, ruleset: str(r.ruleset, 'pl-v2'),
+    reason: str(r.reason, 'collision'), date: str(r.date, '0000-00-00'), maxTicks: int(r.maxTicks, 7200) || 7200,
+    selfie: r.selfie ?? null,
+  };
+}
+
+// ------------------------------------------------------------------ achievement card (GO-2)
+// 1080x1350 (4:5). renderCard(ctx, data) is pure: it only issues CanvasRenderingContext2D calls on
+// the ctx it is given. No I/O, no fetched assets, no clock, no Math.random (the art is seeded by
+// the run seed, so the same run always draws the same card).
+export const CARD_W = 1080, CARD_H = 1350;
+const ART = Object.freeze({x: 66, y: 206, w: 948, h: 640});
+const PORTRAIT = Object.freeze({x: 96, y: 236, w: 272, h: 340});
+const FONT = 'system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+const MONO = 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
+// Foil stops, ink (text accent) and glow tint per tier.
+const TIER_STYLE = {
+  BRONZE: {foil: ['#3d1d0c', '#c9773a', '#ffd6a8', '#8a4a1f', '#e9a267', '#4a2410'], ink: '#ffcf9e', glow: [233, 140, 70]},
+  SILVER: {foil: ['#4b5566', '#c9d3e6', '#ffffff', '#8592a8', '#e6ecf7', '#3e4757'], ink: '#eef3ff', glow: [185, 205, 235]},
+  GOLD: {foil: ['#5e3f08', '#e0a82e', '#fff1b8', '#a8761a', '#ffd76a', '#4d3306'], ink: '#ffe28a', glow: [242, 193, 78]},
+  MYTHIC: {foil: ['#ff5bd6', '#7c9bff', '#69e2d3', '#fff1b8', '#ff5bd6', '#7c9bff'], ink: '#ffffff', glow: [255, 91, 214]},
+};
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+// mulberry32 over the run seed: small, fast, deterministic.
+export function seededRng(seed) {
+  let a = ((seed >>> 0) ^ 0x9e3779b9) >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function foil(ctx, style, x0, y0, x1, y1) {
+  const g = ctx.createLinearGradient(x0, y0, x1, y1);
+  style.foil.forEach((c, i) => g.addColorStop(i / (style.foil.length - 1), c));
+  return g;
+}
+function text(ctx, value, x, y, {font, color, align = 'left', max}) {
+  ctx.font = font; ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+  if (max) ctx.fillText(value, x, y, max); else ctx.fillText(value, x, y);
+}
+
+function drawFrame(ctx, style, rng) {
+  // Foil rim with a diagonal sheen and seeded sparkles, then the dark card body inside it.
+  roundRect(ctx, 0, 0, CARD_W, CARD_H, 48);
+  ctx.fillStyle = foil(ctx, style, 0, 0, CARD_W, CARD_H); ctx.fill();
+  const sheen = ctx.createLinearGradient(0, 0, CARD_W, CARD_H);
+  sheen.addColorStop(0, 'rgba(255,255,255,0)'); sheen.addColorStop(0.42, 'rgba(255,255,255,0)');
+  sheen.addColorStop(0.5, 'rgba(255,255,255,0.45)'); sheen.addColorStop(0.58, 'rgba(255,255,255,0)');
+  sheen.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = sheen; ctx.fill();
+  for (let i = 0; i < 36; i++) {
+    const side = i % 4, k = rng();
+    const x = side === 0 ? k * CARD_W : side === 1 ? CARD_W - 15 : side === 2 ? k * CARD_W : 15;
+    const y = side === 0 ? 15 : side === 1 ? k * CARD_H : side === 2 ? CARD_H - 15 : k * CARD_H;
+    const s = 3 + rng() * 6;
+    ctx.beginPath();
+    ctx.moveTo(x, y - s); ctx.lineTo(x + s * 0.25, y - s * 0.25); ctx.lineTo(x + s, y); ctx.lineTo(x + s * 0.25, y + s * 0.25);
+    ctx.lineTo(x, y + s); ctx.lineTo(x - s * 0.25, y + s * 0.25); ctx.lineTo(x - s, y); ctx.lineTo(x - s * 0.25, y - s * 0.25);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(255,255,255,${(0.35 + rng() * 0.5).toFixed(3)})`; ctx.fill();
+  }
+  roundRect(ctx, 30, 30, CARD_W - 60, CARD_H - 60, 30);
+  const body = ctx.createLinearGradient(0, 30, 0, CARD_H - 30);
+  body.addColorStop(0, '#0d1230'); body.addColorStop(0.55, '#070a1c'); body.addColorStop(1, '#04050d');
+  ctx.fillStyle = body; ctx.fill();
+  const tint = ctx.createRadialGradient(CARD_W / 2, 40, 10, CARD_W / 2, 40, 760);
+  tint.addColorStop(0, rgba(style.glow, 0.32)); tint.addColorStop(1, rgba(style.glow, 0));
+  ctx.fillStyle = tint; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = rgba(style.glow, 0.55); ctx.stroke();
+}
+
+function drawHeader(ctx, style) {
+  const ink = ctx.createLinearGradient(0, 70, 0, 150);
+  ink.addColorStop(0, '#ffffff'); ink.addColorStop(1, style.ink);
+  ctx.save();
+  ctx.shadowColor = rgba(style.glow, 0.7); ctx.shadowBlur = 24;
+  text(ctx, 'PULSE LANES', 76, 142, {font: `italic 900 92px ${FONT}`, color: ink, max: 700});
+  ctx.restore();
+  text(ctx, 'SPACE RACER  ·  ACHIEVEMENT', 80, 184, {font: `700 26px ${MONO}`, color: rgba(style.glow, 0.95), max: 700});
+}
+
+function drawBadge(ctx, tier, style) {
+  const cx = 942, cy = 118, r = 80;
+  ctx.save();
+  ctx.shadowColor = rgba(style.glow, 0.8); ctx.shadowBlur = 30;
+  ctx.beginPath();
+  for (let i = 0; i < 12; i++) { // twelve-point burst rim
+    const a = -Math.PI / 2 + i * Math.PI / 6, rr = i % 2 ? r * 0.9 : r;
+    ctx.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr);
+  }
+  ctx.closePath();
+  ctx.fillStyle = foil(ctx, style, cx - r, cy - r, cx + r, cy + r); ctx.fill();
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(cx, cy, r * 0.74, 0, Math.PI * 2);
+  const core = ctx.createRadialGradient(cx, cy - 20, 4, cx, cy, r * 0.74);
+  core.addColorStop(0, '#1b2350'); core.addColorStop(1, '#05060f');
+  ctx.fillStyle = core; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = style.ink; ctx.stroke();
+  text(ctx, 'TIER', cx, cy - 18, {font: `700 18px ${MONO}`, color: rgba(style.glow, 1), align: 'center'});
+  text(ctx, tier.name, cx, cy + 22, {font: `italic 900 34px ${FONT}`, color: style.ink, align: 'center', max: 108});
+}
+
+// Seeded starfield: a few hundred arcs of varied size, tint and brightness, plus flares.
+function drawStarfield(ctx, rng, style) {
+  const tints = [[255, 255, 255], [190, 255, 250], [255, 210, 250], [210, 220, 255], style.glow];
+  for (let i = 0; i < 340; i++) {
+    const x = ART.x + rng() * ART.w, y = ART.y + rng() * ART.h, size = 0.5 + rng() ** 3 * 2.6;
+    const c = tints[Math.floor(rng() * tints.length)], alpha = 0.35 + rng() * 0.65;
+    ctx.beginPath(); ctx.arc(x, y, size, 0, Math.PI * 2);
+    ctx.fillStyle = rgba(c, alpha.toFixed(3)); ctx.fill();
+    if (size > 2.3) {
+      ctx.beginPath(); ctx.moveTo(x - size * 5, y); ctx.lineTo(x + size * 5, y); ctx.moveTo(x, y - size * 5); ctx.lineTo(x, y + size * 5);
+      ctx.lineWidth = 1; ctx.strokeStyle = rgba(c, (alpha * 0.6).toFixed(3)); ctx.stroke();
+    }
+  }
+}
+
+function drawArt(ctx, d, style, rng) {
+  const {x, y, w, h} = ART;
+  ctx.save();
+  roundRect(ctx, x, y, w, h, 22);
+  ctx.clip();
+  // Vanishing point of the tunnel, nudged by the seed.
+  const vx = x + w * (0.52 + (rng() - 0.5) * 0.3), vy = y + h * (0.34 + (rng() - 0.5) * 0.12);
+  const space = ctx.createRadialGradient(vx, vy, 10, vx, vy, w * 0.9);
+  space.addColorStop(0, '#1a1f4a'); space.addColorStop(0.5, '#0a0d26'); space.addColorStop(1, '#020309');
+  ctx.fillStyle = space; ctx.fillRect(x, y, w, h);
+  // Nebula clouds.
+  ctx.globalCompositeOperation = 'lighter';
+  const clouds = [style.glow, [105, 226, 211], [255, 91, 214], [124, 155, 255]];
+  for (let i = 0; i < 5; i++) {
+    const cx = x + rng() * w, cy = y + rng() * h * 0.8, cr = 160 + rng() * 260;
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr);
+    g.addColorStop(0, rgba(clouds[i % clouds.length], (0.16 + rng() * 0.16).toFixed(3))); g.addColorStop(1, rgba(clouds[i % clouds.length], 0));
+    ctx.fillStyle = g; ctx.fillRect(x, y, w, h);
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  drawStarfield(ctx, rng, style);
+  // Speed streaks out of the vanishing point.
+  for (let i = 0; i < 30; i++) {
+    const a = rng() * Math.PI * 2, r0 = 70 + rng() * 90, r1 = r0 + 140 + rng() * 460;
+    ctx.beginPath(); ctx.moveTo(vx + Math.cos(a) * r0, vy + Math.sin(a) * r0); ctx.lineTo(vx + Math.cos(a) * r1, vy + Math.sin(a) * r1);
+    ctx.lineWidth = 1 + rng() * 2; ctx.strokeStyle = `rgba(200,230,255,${(0.08 + rng() * 0.2).toFixed(3)})`; ctx.stroke();
+  }
+  drawTube(ctx, d, style, rng, vx, vy);
+  drawShip(ctx, d, style, vx, vy);
+  // Vignette.
+  const vig = ctx.createRadialGradient(x + w / 2, y + h / 2, h * 0.35, x + w / 2, y + h / 2, w * 0.75);
+  vig.addColorStop(0, 'rgba(0,0,0,0)'); vig.addColorStop(1, 'rgba(0,0,0,0.6)');
+  ctx.fillStyle = vig; ctx.fillRect(x, y, w, h);
+  ctx.restore();
+  roundRect(ctx, x, y, w, h, 22);
+  ctx.lineWidth = 6; ctx.strokeStyle = foil(ctx, style, x, y, x + w, y + h); ctx.stroke();
+}
+
+// Curved tunnel: rings along a seeded quadratic curve from below the window into the vanishing
+// point, lane rails along the tube floor, a pulse glow at the far end and a few asteroids.
+function drawTube(ctx, d, style, rng, vx, vy) {
+  const p0 = [ART.x + ART.w * 0.5, ART.y + ART.h + 280];
+  const c = [ART.x + ART.w * (0.15 + rng() * 0.7), ART.y + ART.h * (0.5 + rng() * 0.2)];
+  const at = s => [(1 - s) ** 2 * p0[0] + 2 * (1 - s) * s * c[0] + s * s * vx, (1 - s) ** 2 * p0[1] + 2 * (1 - s) * s * c[1] + s * s * vy];
+  const rings = [];
+  for (let i = 0; i < 18; i++) {
+    const r = 620 / (1 + 0.45 * i), s = 1 - r / 620;
+    const [cx, cy] = at(s), [nx, ny] = at(Math.min(1, s + 0.02));
+    rings.push({cx, cy, r, tilt: Math.atan2(ny - cy, nx - cx) + Math.PI / 2});
+  }
+  const glow = ctx.createRadialGradient(vx, vy, 0, vx, vy, 120);
+  glow.addColorStop(0, 'rgba(255,255,255,0.95)'); glow.addColorStop(0.25, rgba(style.glow, 0.6)); glow.addColorStop(1, rgba(style.glow, 0));
+  ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(vx, vy, 120, 0, Math.PI * 2); ctx.fill();
+  for (let i = rings.length - 1; i >= 0; i--) {
+    const {cx, cy, r, tilt} = rings[i], fade = 1 - i / rings.length;
+    ctx.beginPath(); ctx.ellipse(cx, cy, r, r * 0.86, tilt * 0.25, 0, Math.PI * 2);
+    ctx.lineWidth = Math.max(2, r * 0.05); ctx.strokeStyle = `rgba(105,226,211,${(0.06 + 0.1 * fade).toFixed(3)})`; ctx.stroke();
+    ctx.lineWidth = Math.max(1, r * 0.008); ctx.strokeStyle = `rgba(160,245,235,${(0.25 + 0.6 * fade).toFixed(3)})`; ctx.stroke();
+  }
+  // Lane rails on the tube floor; the ship's lane glows brighter.
+  const lanes = d.lanes, spread = 0.36;
+  for (let k = 0; k < lanes; k++) {
+    const theta = Math.PI / 2 + (k - (lanes - 1) / 2) * spread;
+    ctx.beginPath();
+    rings.forEach(({cx, cy, r}, i) => {
+      const px = cx + Math.cos(theta) * r, py = cy + Math.sin(theta) * r * 0.86;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    const active = k === Math.min(d.lane, lanes - 1);
+    ctx.lineWidth = active ? 5 : 3; ctx.strokeStyle = active ? 'rgba(255,91,214,0.95)' : 'rgba(255,91,214,0.45)'; ctx.stroke();
+  }
+  // Asteroids: jagged seeded polygons inside the tube.
+  for (let i = 0; i < 5; i++) {
+    const ring = rings[3 + Math.floor(rng() * 10)], a = rng() * Math.PI * 2, off = rng() * 0.6;
+    const ax = ring.cx + Math.cos(a) * ring.r * off, ay = ring.cy + Math.sin(a) * ring.r * 0.86 * off, size = Math.max(8, ring.r * 0.12);
+    ctx.beginPath();
+    for (let v = 0; v < 9; v++) {
+      const va = v / 9 * Math.PI * 2, vr = size * (0.7 + rng() * 0.45);
+      ctx.lineTo(ax + Math.cos(va) * vr, ay + Math.sin(va) * vr);
+    }
+    ctx.closePath();
+    const rock = ctx.createRadialGradient(ax - size * 0.3, ay - size * 0.3, 1, ax, ay, size * 1.2);
+    rock.addColorStop(0, '#8d8597'); rock.addColorStop(1, '#2a2533');
+    ctx.fillStyle = rock; ctx.fill();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(255,220,200,0.35)'; ctx.stroke();
+  }
+}
+
+// Ship silhouette from behind (chase view), nose toward the vanishing point, twin engine glow
+// and the weapon of the loop reached (laser beam or rocket trail).
+function drawShip(ctx, d, style, vx, vy) {
+  const sx = ART.x + ART.w * 0.5, sy = ART.y + ART.h - 150;
+  const yaw = Math.max(-0.35, Math.min(0.35, Math.atan2(vx - sx, sy - vy)));
+  const nose = [sx + Math.sin(yaw) * 80, sy - Math.cos(yaw) * 80];
+  ctx.beginPath(); ctx.moveTo(nose[0], nose[1]);
+  if (d.weapon === 'rocket') {
+    ctx.quadraticCurveTo((nose[0] + vx) / 2 + 40, (nose[1] + vy) / 2, vx + (nose[0] - vx) * 0.35, vy + (nose[1] - vy) * 0.35);
+    ctx.lineWidth = 6; ctx.strokeStyle = 'rgba(255,180,90,0.85)';
+  } else {
+    ctx.lineTo(vx + (nose[0] - vx) * 0.25, vy + (nose[1] - vy) * 0.25);
+    ctx.lineWidth = 7; ctx.strokeStyle = 'rgba(255,91,214,0.9)';
+  }
+  ctx.stroke();
+  ctx.save();
+  ctx.translate(sx, sy); ctx.rotate(yaw);
+  ctx.globalCompositeOperation = 'lighter';
+  for (const ex of [-28, 28]) {
+    const flame = ctx.createRadialGradient(ex, 34, 0, ex, 34, 70);
+    flame.addColorStop(0, 'rgba(255,255,255,0.95)'); flame.addColorStop(0.3, 'rgba(105,226,211,0.8)'); flame.addColorStop(1, 'rgba(105,226,211,0)');
+    ctx.fillStyle = flame; ctx.beginPath(); ctx.arc(ex, 34, 70, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.beginPath();
+  ctx.moveTo(0, -84); ctx.lineTo(34, 4); ctx.lineTo(122, 36); ctx.lineTo(44, 30); ctx.lineTo(0, 46);
+  ctx.lineTo(-44, 30); ctx.lineTo(-122, 36); ctx.lineTo(-34, 4); ctx.closePath();
+  const hull = ctx.createLinearGradient(0, -84, 0, 46);
+  hull.addColorStop(0, '#2b3566'); hull.addColorStop(1, '#070912');
+  ctx.fillStyle = hull; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = style.ink; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-118, 35); ctx.lineTo(-34, 4); ctx.lineTo(0, -82); ctx.lineTo(34, 4); ctx.lineTo(118, 35);
+  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(105,226,211,0.9)'; ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(0, -16, 11, 24, 0, 0, Math.PI * 2);
+  const canopy = ctx.createLinearGradient(0, -40, 0, 8);
+  canopy.addColorStop(0, '#d9fff9'); canopy.addColorStop(1, '#2a6c80');
+  ctx.fillStyle = canopy; ctx.fill();
+  ctx.restore();
+}
+
+function drawPortrait(ctx, img, style) {
+  const {x, y, w, h} = PORTRAIT;
+  const iw = img.naturalWidth || img.videoWidth || img.width || 0, ih = img.naturalHeight || img.videoHeight || img.height || 0;
+  if (!(iw > 0 && ih > 0)) return false;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 24; ctx.shadowOffsetY = 8;
+  roundRect(ctx, x - 9, y - 9, w + 18, h + 18, 20);
+  ctx.fillStyle = foil(ctx, style, x, y, x + w, y + h); ctx.fill();
+  ctx.restore();
+  ctx.save();
+  roundRect(ctx, x, y, w, h, 14);
+  ctx.clip();
+  const k = Math.max(w / iw, h / ih), dw = iw * k, dh = ih * k; // cover crop, centred
+  ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+  const shade = ctx.createLinearGradient(0, y + h * 0.6, 0, y + h);
+  shade.addColorStop(0, 'rgba(5,6,15,0)'); shade.addColorStop(1, 'rgba(5,6,15,0.85)');
+  ctx.fillStyle = shade; ctx.fillRect(x, y, w, h);
+  const gloss = ctx.createLinearGradient(x, y, x + w, y + h * 0.5);
+  gloss.addColorStop(0, 'rgba(255,255,255,0.22)'); gloss.addColorStop(0.4, 'rgba(255,255,255,0)');
+  ctx.fillStyle = gloss; ctx.fillRect(x, y, w, h);
+  ctx.restore();
+  text(ctx, 'PILOT', x + w / 2, y + h - 18, {font: `800 26px ${MONO}`, color: style.ink, align: 'center'});
+  return true;
+}
+
+function panel(ctx, x, y, w, h, style) {
+  roundRect(ctx, x, y, w, h, 18);
+  ctx.fillStyle = 'rgba(16,22,44,0.72)'; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = rgba(style.glow, 0.5); ctx.stroke();
+}
+
+function drawStats(ctx, d, tier, style) {
+  const top = 870, h = 186;
+  panel(ctx, 66, top, 486, h, style);
+  text(ctx, 'SCORE', 92, top + 42, {font: `700 26px ${MONO}`, color: rgba(style.glow, 1)});
+  text(ctx, `/ ${d.maxTicks}`, 528, top + 42, {font: `700 26px ${MONO}`, color: '#8e9ab9', align: 'right'});
+  const big = ctx.createLinearGradient(0, top + 60, 0, top + 170);
+  big.addColorStop(0, '#ffffff'); big.addColorStop(1, style.ink);
+  ctx.save();
+  ctx.shadowColor = rgba(style.glow, 0.75); ctx.shadowBlur = 26;
+  text(ctx, String(d.score), 88, top + 160, {font: `italic 900 122px ${FONT}`, color: big, max: 440});
+  ctx.restore();
+  const cells = [['TIME', formatTime(d.ticks, d.tps), 572], ['LOOPS', `${d.loops}/${d.loopCount}`, 798]];
+  for (const [label, value, cx] of cells) {
+    panel(ctx, cx, top, 216, h, style);
+    text(ctx, label, cx + 108, top + 42, {font: `700 26px ${MONO}`, color: rgba(style.glow, 1), align: 'center'});
+    text(ctx, value, cx + 108, top + 136, {font: `800 64px ${MONO}`, color: '#eef1ff', align: 'center', max: 196});
+  }
+  text(ctx, `“${flavorText(d.reason, d.loops)}”`, CARD_W / 2, 1110, {font: `italic 500 32px ${FONT}`, color: '#cfd6f2', align: 'center', max: 940});
+  const rule = ctx.createLinearGradient(80, 0, CARD_W - 80, 0);
+  rule.addColorStop(0, rgba(style.glow, 0)); rule.addColorStop(0.5, rgba(style.glow, 0.9)); rule.addColorStop(1, rgba(style.glow, 0));
+  ctx.fillStyle = rule; ctx.fillRect(80, 1138, CARD_W - 160, 2);
+  text(ctx, `SEED ${d.seed}   ·   ${d.ruleset}   ·   ${d.date} UTC`, CARD_W / 2, 1192, {font: `700 30px ${MONO}`, color: '#69e2d3', align: 'center', max: 940});
+  // Tier thresholds stated on the card; the earned tier is lit.
+  const order = [...TIERS].reverse();
+  order.forEach((t, i) => {
+    const cx = 168 + i * 248, lit = t.name === tier.name;
+    const label = t.min >= d.maxTicks ? `${t.name} ${t.min}` : `${t.name} ${t.min}+`;
+    text(ctx, label, cx, 1246, {font: `${lit ? 800 : 600} 24px ${MONO}`, color: lit ? style.ink : '#6f7899', align: 'center', max: 236});
+    if (lit) { ctx.fillStyle = style.ink; ctx.fillRect(cx - 60, 1258, 120, 3); }
+  });
+  text(ctx, `TIERS BY SCORE (SURVIVED TICKS)`, CARD_W / 2, 1296, {font: `600 18px ${MONO}`, color: '#59617f', align: 'center'});
+  text(ctx, `No.${d.seed.toString(16).padStart(8, '0').toUpperCase()}`, 70, 1296, {font: `600 18px ${MONO}`, color: '#59617f'});
+}
+
+export function renderCard(ctx, data) {
+  const d = normalizeResult(data);
+  const tier = tierFor(d.score), style = TIER_STYLE[tier.name], rng = seededRng(d.seed);
+  ctx.save();
+  ctx.clearRect(0, 0, CARD_W, CARD_H);
+  drawFrame(ctx, style, rng);
+  drawArt(ctx, d, style, rng);
+  const portrait = d.selfie ? drawPortrait(ctx, d.selfie, style) : false;
+  drawHeader(ctx, style);
+  drawBadge(ctx, tier, style);
+  drawStats(ctx, d, tier, style);
+  ctx.restore();
+  return {tier: tier.name, time: formatTime(d.ticks, d.tps), portrait};
+}
+
+// Icons reuse the lobby stroke style. The SVG namespace is read from an inline SVG already in the
+// static page, so this file carries no URL string; without one the buttons stay text-only.
+const ICONS = {
+  card: ['M6 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z', 'M7 7h10v6H7z', 'M7 16h6'],
+  lobby: ['M10 6L4 12l6 6', 'M4 12h11a5 5 0 0 1 5 5v1'],
+  camera: ['M4 8h3l2-3h6l2 3h3v11H4z', 'M12 16.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z'],
+  save: ['M12 4v11', 'M7 10l5 5 5-5', 'M4 15v5h16v-5'],
+  share: ['M18 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M6 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M18 22a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+    'M8.6 13.5l6.8 4', 'M15.4 6.5l-6.8 4'],
+};
+
+export function createGameOver({document: doc = globalThis.document, navigator: nav = globalThis.navigator, URL: Url = globalThis.URL,
+  onBack = () => {}} = {}) {
+  const svgNs = doc.querySelector?.('svg')?.namespaceURI ?? null;
+  const el = (tag, cls, text) => {
+    const node = doc.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+  const icon = name => {
+    if (!svgNs) return null;
+    const svg = doc.createElementNS(svgNs, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true'); svg.setAttribute('focusable', 'false');
+    for (const d of ICONS[name]) { const p = doc.createElementNS(svgNs, 'path'); p.setAttribute('d', d); svg.append(p); }
+    return svg;
+  };
+  const button = (cls, iconName, label) => {
+    const b = el('button', cls);
+    b.type = 'button';
+    const i = icon(iconName);
+    if (i) b.append(i);
+    b.append(el('span', '', label));
+    return b;
+  };
+
+  const dialog = el('dialog', 'gameover');
+  dialog.id = 'gameover';
+  dialog.setAttribute('aria-labelledby', 'gameover-title');
+
+  // Summary view (GO-1).
+  const summary = el('section', 'go-summary');
+  const eyebrow = el('p', 'go-eyebrow');
+  const title = el('h2', 'go-title'); title.id = 'gameover-title';
+  const scoreBox = el('div', 'go-score');
+  const scoreValue = el('b', 'go-big'), scoreOf = el('span', 'go-of');
+  scoreBox.append(el('span', 'go-k', 'Score'), scoreValue, scoreOf);
+  const stats = el('div', 'go-stats');
+  const stat = label => { const box = el('div', 'go-stat'), v = el('b'); box.append(el('span', 'go-k', label), v); stats.append(box); return v; };
+  const timeValue = stat('Time'), loopsValue = stat('Loops'), tierValue = stat('Tier');
+  const flavor = el('p', 'go-flavor');
+  const dataLine = el('p', 'go-data');
+  const actions = el('div', 'go-actions');
+  const makeCardButton = button('go-make primary', 'card', 'Make card');
+  const backButton = button('go-back', 'lobby', 'Back to lobby');
+  actions.append(makeCardButton, backButton);
+  summary.append(eyebrow, title, scoreBox, stats, flavor, dataLine, actions);
+
+  // Card view (GO-2..GO-4).
+  const cardView = el('section', 'go-cardview');
+  cardView.hidden = true;
+  const canvas = el('canvas', 'go-canvas');
+  canvas.width = CARD_W; canvas.height = CARD_H;
+  canvas.setAttribute('role', 'img');
+  const tools = el('div', 'go-tools');
+  const selfieButton = button('go-selfie icon', 'camera', 'Selfie');
+  const saveButton = button('go-save icon', 'save', 'Save image');
+  const shareButton = button('go-share icon', 'share', 'Share');
+  const cardBackButton = button('go-back icon', 'lobby', 'Lobby');
+  tools.append(selfieButton, saveButton, shareButton, cardBackButton);
+  const hint = el('p', 'go-hint');
+  hint.setAttribute('role', 'status');
+  cardView.append(canvas, tools, hint);
+
+  dialog.append(summary, cardView);
+  doc.body.append(dialog);
+
+  let result = null;
+  // Selfie (GO-3): an in-memory image only. It is never uploaded, written to storage or sent
+  // anywhere; it lives until the page is closed or another photo replaces it.
+  let selfie = null, selfieUrl = null, pendingInput = null;
+  const setHint = message => { hint.textContent = message; };
+  const NO_SHARE = 'Sharing is not available in this browser. Use Save image, then post it from your gallery.';
+  let sharable = false, blobPromise = null, card = null;
+  const restingHint = () => (sharable ? '' : NO_SHARE);
+  const filename = () => `space-racer-${result.score}-${result.seed}.png`;
+
+  function drawCard() {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) { setHint('This browser cannot draw the card.'); return null; }
+    card = renderCard(ctx, {...result, selfie});
+    canvas.setAttribute('aria-label', `Achievement card: ${card.tier}, score ${result.score}, time ${card.time}, seed ${result.seed}`);
+    blobPromise = null;
+    pngBlob(); // encode now so Share can call navigator.share while the tap still counts as a gesture
+    return card;
+  }
+  function pngBlob() {
+    if (!blobPromise) {
+      blobPromise = new Promise(resolve => {
+        try { canvas.toBlob(blob => resolve(blob ?? null), 'image/png'); } catch { resolve(null); }
+      });
+    }
+    return blobPromise;
+  }
+
+  // GO-4: Web Share with a PNG File where the platform supports files (the Android share sheet
+  // lists Instagram and Threads when installed); otherwise Share is hidden and Save image is the
+  // way out. No social APIs and no network calls: the PNG only goes to the share sheet or a
+  // local download.
+  function canShareFiles() {
+    try {
+      if (typeof nav?.share !== 'function' || typeof nav?.canShare !== 'function' || typeof File !== 'function') return false;
+      return Boolean(nav.canShare({files: [new File([new Uint8Array(8)], 'card.png', {type: 'image/png'})]}));
+    } catch { return false; }
+  }
+  function refreshShare() {
+    sharable = canShareFiles();
+    shareButton.hidden = !sharable;
+    shareButton.disabled = !sharable;
+  }
+  async function saveImage() {
+    const blob = await pngBlob();
+    if (!blob) return setHint('The card image could not be created.');
+    const url = Url.createObjectURL(blob);
+    const link = doc.createElement('a');
+    link.href = url;
+    link.download = filename();
+    link.className = 'go-file';
+    dialog.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => Url.revokeObjectURL(url), 10000);
+    setHint(`Saved ${link.download}`);
+  }
+  let sharing = false;
+  async function shareImage() {
+    refreshShare();
+    if (!sharable) return setHint(NO_SHARE);
+    if (sharing) return;
+    const blob = await pngBlob();
+    if (!blob) return setHint('The card image could not be created.');
+    const file = new File([blob], filename(), {type: 'image/png'});
+    sharing = true;
+    try {
+      if (!nav.canShare({files: [file]})) return setHint(NO_SHARE);
+      await nav.share({files: [file], title: 'Pulse Lanes',
+        text: `${card?.tier ?? tierFor(result.score).name} run in Pulse Lanes: score ${result.score}, time ${formatTime(result.ticks, result.tps)}, seed ${result.seed}.`});
+      setHint(restingHint());
+    } catch (err) {
+      if (err?.name !== 'AbortError') setHint('Share did not finish. Use Save image instead.');
+    } finally { sharing = false; }
+  }
+
+  function openCard() {
+    if (!result) return;
+    summary.hidden = true; cardView.hidden = false;
+    refreshShare();
+    setHint(restingHint());
+    drawCard();
+    (sharable ? shareButton : saveButton).focus?.();
+  }
+  const isOpen = () => Boolean(dialog.open);
+
+  const dropPendingInput = () => { pendingInput?.remove?.(); pendingInput = null; };
+  function loadSelfie(file) {
+    if (file.type && !file.type.startsWith('image/')) return setHint('That file is not a photo.');
+    let url;
+    try { url = Url.createObjectURL(file); } catch { return setHint('That photo could not be read.'); }
+    const img = doc.createElement('img');
+    img.decoding = 'async';
+    img.onload = () => {
+      if (selfieUrl) Url.revokeObjectURL(selfieUrl);
+      selfie = img; selfieUrl = url;
+      selfieButton.lastChild.textContent = 'Retake';
+      setHint(restingHint());
+      drawCard();
+    };
+    img.onerror = () => { Url.revokeObjectURL(url); setHint('That photo could not be read.'); };
+    img.src = url;
+  }
+  // The file input is created here, at click time, and removed once used: the static page never
+  // holds an input outside #lobby. accept + capture ask phones for the front camera; browsers
+  // without a camera show a plain file chooser, and any failure only leaves a hint.
+  function takeSelfie() {
+    dropPendingInput();
+    try {
+      const input = doc.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.setAttribute('capture', 'user');
+      input.className = 'go-file';
+      input.addEventListener('change', () => {
+        const file = input.files?.[0];
+        if (pendingInput === input) dropPendingInput();
+        if (file) loadSelfie(file);
+      });
+      input.addEventListener('cancel', () => { if (pendingInput === input) dropPendingInput(); });
+      pendingInput = input;
+      dialog.append(input);
+      input.click();
+    } catch {
+      dropPendingInput();
+      setHint('Camera or photo picker is not available here.');
+    }
+  }
+
+  function show(raw) {
+    result = normalizeResult(raw);
+    const tier = tierFor(result.score);
+    const [kicker, headline] = HEADLINES[result.reason] ?? HEADLINES.collision;
+    eyebrow.textContent = kicker;
+    title.textContent = headline;
+    scoreValue.textContent = String(result.score);
+    scoreOf.textContent = `/ ${result.maxTicks}`;
+    timeValue.textContent = formatTime(result.ticks, result.tps);
+    loopsValue.textContent = `${result.loops} / ${result.loopCount}`;
+    tierValue.textContent = tier.name;
+    dialog.dataset.tier = tier.name.toLowerCase();
+    flavor.textContent = flavorText(result.reason, result.loops);
+    dataLine.textContent = `${result.ruleset} · seed ${result.seed}`;
+    summary.hidden = false; cardView.hidden = true;
+    closedByUs = false;
+    if (!dialog.open) { try { dialog.showModal(); } catch { dialog.setAttribute('open', ''); } }
+    makeCardButton.focus?.();
+  }
+  let closedByUs = true;
+  function hide() {
+    closedByUs = true;
+    dropPendingInput();
+    if (dialog.open) { try { dialog.close(); } catch { /* attribute fallback below */ } }
+    dialog.removeAttribute('open');
+  }
+  function back() { hide(); onBack(); }
+
+  makeCardButton.addEventListener('click', openCard);
+  backButton.addEventListener('click', back);
+  cardBackButton.addEventListener('click', back);
+  selfieButton.addEventListener('click', takeSelfie);
+  saveButton.addEventListener('click', saveImage);
+  shareButton.addEventListener('click', shareImage);
+  // Escape acts as Back to lobby, so dismissing the modal always lands in the lobby.
+  dialog.addEventListener('cancel', event => { event.preventDefault(); back(); });
+  // A browser may still close the modal on its own (repeated Escape or Android back without a
+  // new gesture ignores preventDefault); that close also means Back to lobby, never a dead end.
+  dialog.addEventListener('close', () => { if (!closedByUs) { closedByUs = true; dropPendingInput(); onBack(); } });
+
+  return {show, hide, back, isOpen, openCard, dialog, canvas, elements: {makeCardButton, backButton, cardBackButton, selfieButton, saveButton, shareButton, hint},
+    pngBlob: () => pngBlob()};
+}

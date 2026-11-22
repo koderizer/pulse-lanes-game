@@ -12,6 +12,7 @@ import {createPause} from './pause.js';
 import {applySetting, defaultSettings, lastResultText, retryEnabled, SETTING_CONTROLS} from './lobby_model.js';
 import {createRenderer} from './render.js';
 import {createRenderer2d} from './render2d.js';
+import {createGameOver} from './gameover.js';
 
 const BUILD = 'pl-web-0.2.0';
 // Spec section 2 SPAWN_Z (mu). The sim module keeps this constant private, so it is handed to the
@@ -132,6 +133,7 @@ function updateLobby() {
   $('history').textContent = `${save.runs.length} recorded runs · Best: ${best} / ${MAX_TICKS} ticks`;
 }
 function openLobby() {
+  gameOver.hide();
   document.body.classList.remove('running');
   updateLobby();
   if (!lobby.open) { try { lobby.showModal(); } catch { lobby.setAttribute('open', ''); } }
@@ -141,6 +143,12 @@ function closeLobby() {
   document.body.classList.add('running');
 }
 lobby.addEventListener('cancel', event => event.preventDefault()); // Escape never closes the lobby without a run
+
+// Game over (spec 18 GO-1, ruling R31): a finished run shows this modal first; Back to lobby
+// (or Escape) dismisses it and opens the lobby exactly as before. No run is in progress while
+// it is open. Idle timeouts leave an open game over modal in place instead of yanking it.
+const gameOver = createGameOver({document, onBack: () => openLobby()});
+function openLobbyUnlessGameOver() { if (!gameOver.isOpen()) openLobby(); }
 
 function applySettingsToOutputs() {
   const s = settingsNow();
@@ -180,7 +188,14 @@ function start(nextSeed) {
 
 function finishRun() {
   stopRun();
-  openLobby();
+  const s = currState;
+  if (!s || s.status !== 'ended' || s.terminal_reason === 'abandoned') return openLobby();
+  document.body.classList.remove('running');
+  gameOver.show({
+    score: s.score, ticks: s.terminal_tick, tps: TICKS_PER_SECOND, maxTicks: MAX_TICKS,
+    loops: s.loop + 1, loopCount: map?.loops?.length ?? 3, lanes: s.lane_count, lane: s.lane, weapon: s.weapon,
+    seed: s.seed, ruleset: s.ruleset_id, reason: s.terminal_reason, date: now().slice(0, 10),
+  });
 }
 
 const pause = createPause({
@@ -283,7 +298,7 @@ for (const [id, kind] of [['hop-left', 'left'], ['hop-right', 'right'], ['fire',
 }
 const STICK_KEYS = {KeyW: 'w', KeyA: 'a', KeyS: 's', KeyD: 'd'};
 document.addEventListener('keydown', event => {
-  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName) || lobby.open) return;
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName) || lobby.open || gameOver.isOpen()) return;
   if (STICK_KEYS[event.code]) { held[STICK_KEYS[event.code]] = true; return; }
   if (event.repeat) return;
   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); press(event.key === 'ArrowLeft' ? 'left' : 'right'); }
@@ -335,11 +350,11 @@ document.addEventListener('keydown', () => music.gesture(), {once: true});
 document.addEventListener('visibilitychange', () => {
   previousFrame = null; accumulator = 0;
   if (document.hidden) music.quiet();
-  else if (session && Date.now() - lastActive >= IDLE_MS) { endSession(); openLobby(); }
+  else if (session && Date.now() - lastActive >= IDLE_MS) { endSession(); openLobbyUnlessGameOver(); }
 });
 window.addEventListener('pagehide', () => endSession());
 setInterval(() => {
-  if (session && Date.now() - lastActive >= IDLE_MS) { endSession(); openLobby(); notice('Session ended after five minutes without active play.'); }
+  if (session && Date.now() - lastActive >= IDLE_MS) { endSession(); openLobbyUnlessGameOver(); notice('Session ended after five minutes without active play.'); }
 }, 1000);
 
 // ------------------------------------------------------------------ boot

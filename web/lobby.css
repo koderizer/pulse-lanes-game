@@ -183,6 +183,83 @@ dialog#lobby::after{content:"";position:absolute;inset:8px;z-index:-1;pointer-ev
   #lobby .vault{grid-template-columns:repeat(3,1fr)}
 }
 
+/* Game over modal (spec 18 GO-1, built by web/gameover.js). Same glass and neon language as the
+   lobby; the tier tints the frame through data-tier on the dialog. */
+dialog.gameover{--mag:#ff5bd6;--ink:#05060f;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--tier:#e9a267;--tier2:#ffd0a0;
+  width:min(520px,calc(100vw - 16px));max-width:none;max-height:calc(100dvh - 16px);overflow:auto;padding:22px 20px 18px;
+  color:#eef1ff;border:1px solid color-mix(in srgb,var(--tier) 60%,transparent);border-radius:20px;isolation:isolate;text-align:center;
+  background:
+    radial-gradient(110% 55% at 50% -10%,color-mix(in srgb,var(--tier) 30%,transparent),transparent 62%),
+    radial-gradient(80% 50% at 110% 110%,rgba(255,91,214,.16),transparent 60%),
+    linear-gradient(180deg,#0a0e21 0%,#05060f 100%);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.04),0 0 50px color-mix(in srgb,var(--tier) 28%,transparent),0 30px 90px rgba(0,0,0,.7);
+  touch-action:pan-y;scrollbar-width:thin;scrollbar-color:#30374f transparent;animation:go-in .35s cubic-bezier(.2,.9,.3,1.2)}
+dialog.gameover::backdrop{background:radial-gradient(circle at 50% 40%,rgba(10,14,34,.5),rgba(3,4,10,.9))}
+dialog.gameover[data-tier=silver]{--tier:#b9c6dc;--tier2:#ffffff}
+dialog.gameover[data-tier=gold]{--tier:#f2c14e;--tier2:#fff1b8}
+dialog.gameover[data-tier=mythic]{--tier:#ff5bd6;--tier2:#69e2d3}
+dialog.gameover [hidden]{display:none!important}
+@keyframes go-in{from{transform:translateY(18px) scale(.96);opacity:0}to{transform:none;opacity:1}}
+
+.gameover .go-eyebrow{margin:0 0 4px;font:700 11px/1 var(--mono);letter-spacing:.32em;text-transform:uppercase;color:var(--tier)}
+.gameover .go-title{margin:0 0 14px;font-size:clamp(28px,8vw,40px);font-weight:900;font-style:italic;letter-spacing:.06em;text-transform:uppercase;
+  background:linear-gradient(180deg,#fff 10%,var(--tier2) 55%,var(--tier) 95%);-webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 0 10px color-mix(in srgb,var(--tier) 45%,transparent))}
+.gameover .go-k{display:block;font:700 11px/1 var(--mono);letter-spacing:.2em;text-transform:uppercase;color:#8e9ab9}
+.gameover .go-score{display:flex;flex-direction:column;align-items:center;gap:2px;margin:0 0 14px;padding:12px 10px 10px;
+  border:1px solid rgba(48,55,79,.9);border-radius:16px;background:rgba(5,8,20,.55)}
+.gameover .go-big{font-size:clamp(64px,22vw,96px);line-height:1;font-weight:900;font-style:italic;font-variant-numeric:tabular-nums;letter-spacing:.02em;
+  background:linear-gradient(180deg,#fff 20%,var(--tier2) 60%,var(--tier) 100%);-webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 0 16px color-mix(in srgb,var(--tier) 50%,transparent))}
+.gameover .go-of{font:700 13px/1 var(--mono);color:#a7afc9;letter-spacing:.1em}
+.gameover .go-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:0 0 12px}
+.gameover .go-stat{padding:10px 6px;border:1px solid #2c3554;border-radius:12px;background:rgba(16,22,44,.62)}
+.gameover .go-stat b{display:block;margin-top:6px;font:800 22px/1 var(--mono);font-variant-numeric:tabular-nums;color:#eef1ff}
+.gameover .go-stat:last-child b{color:var(--tier2);text-shadow:0 0 10px color-mix(in srgb,var(--tier) 70%,transparent)}
+.gameover .go-flavor{margin:0 4px 8px;font-style:italic;font-size:14px;line-height:1.45;color:#cfd6f2}
+.gameover .go-data{margin:0 0 14px;font:12px/1.5 var(--mono);color:var(--cyan);-webkit-user-select:text;user-select:text;overflow-wrap:anywhere}
+
+/* Graphic buttons (icon plus label), matching the lobby buttons. */
+.gameover button{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:52px;
+  background:linear-gradient(180deg,rgba(40,50,84,.75),rgba(18,23,44,.85));border:1px solid #39446a;color:#dfe6ff;
+  border-radius:12px;padding:10px 12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:13px;
+  transition:border-color .15s,box-shadow .15s,transform .15s}
+.gameover button:hover:not(:disabled){border-color:var(--tier);box-shadow:0 0 14px color-mix(in srgb,var(--tier) 40%,transparent)}
+.gameover button:active:not(:disabled){transform:translateY(1px)}
+.gameover button:disabled{opacity:.35}
+.gameover svg{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.gameover .go-actions{display:grid;grid-template-columns:1.4fr 1fr;gap:10px}
+.gameover button.go-make{color:var(--ink);border:0;font-size:16px;letter-spacing:.14em;
+  background:linear-gradient(100deg,var(--tier2) 0%,var(--tier) 45%,var(--mag) 100%);
+  box-shadow:0 0 0 1px rgba(255,255,255,.25) inset,0 0 22px color-mix(in srgb,var(--tier) 45%,transparent);animation:go-glow 2.6s ease-in-out infinite}
+.gameover button.go-make::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(180deg,rgba(255,255,255,.35),transparent 55%)}
+/* Card view: the 1080x1350 canvas scaled to fit the phone, tools row, one-line hint. */
+.gameover .go-canvas{display:block;width:min(100%,calc((100dvh - 200px) * .8));height:auto;aspect-ratio:4/5;margin:0 auto 12px;
+  border-radius:16px;box-shadow:0 0 0 1px rgba(255,255,255,.06),0 0 34px color-mix(in srgb,var(--tier) 35%,transparent),0 18px 50px rgba(0,0,0,.6)}
+.gameover .go-tools{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:8px}
+.gameover .go-tools .go-share{color:var(--ink);border:0;background:linear-gradient(140deg,var(--tier2),var(--tier) 55%,var(--mag))}
+.gameover .go-file{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.gameover .go-tools .icon{flex-direction:column;gap:5px;min-width:0;padding:9px 4px 8px;font-size:11px;letter-spacing:.12em}
+.gameover .go-hint{min-height:18px;margin:10px 2px 0;font:11px/1.5 var(--mono);color:#f7d7a1}
+.gameover .go-hint:empty{margin:0;min-height:0}
+/* Phone held sideways (the play orientation): compact summary; card beside its tools. */
+@media (orientation:landscape) and (max-height:540px){
+  dialog.gameover{width:min(780px,calc(100vw - 16px));padding:12px 14px}
+  .gameover .go-title{margin-bottom:8px;font-size:26px}
+  .gameover .go-score{flex-direction:row;justify-content:center;align-items:baseline;gap:12px;margin-bottom:8px;padding:6px 10px}
+  .gameover .go-big{font-size:58px}
+  .gameover .go-stats{margin-bottom:8px}
+  .gameover .go-stat{padding:6px}
+  .gameover .go-flavor{margin-bottom:4px}
+  .gameover .go-data{margin-bottom:8px}
+  .gameover button{min-height:44px}
+  .gameover .go-cardview{display:grid;grid-template-columns:auto 1fr;column-gap:14px;align-items:center}
+  .gameover .go-canvas{grid-row:1/span 2;width:auto;height:calc(100dvh - 48px);margin:0}
+  .gameover .go-tools{grid-auto-flow:row;grid-template-columns:1fr 1fr}
+  .gameover .go-hint{grid-column:2}
+}
+@keyframes go-glow{50%{box-shadow:0 0 0 1px rgba(255,255,255,.25) inset,0 0 36px color-mix(in srgb,var(--tier) 75%,transparent)}}
+
 /* Reduced motion: honour the lobby setting (the checkbox app.js keeps in sync) and the OS preference. */
 body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *::before,body:has(#set-reduced-motion:checked) *::after{animation:none!important;transition:none!important}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}}
