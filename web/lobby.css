@@ -49,18 +49,140 @@ body.running #hud,body.running #touch{display:flex}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:24px 28px;text-align:center}
 .panel h2{margin:0 0 6px}
 
-dialog#lobby{max-width:min(620px,calc(100vw - 24px));max-height:calc(100vh - 24px);overflow:auto;padding:24px;
-  background:var(--panel);color:inherit;border:1px solid var(--line);border-radius:20px;touch-action:pan-y;-webkit-user-select:text;user-select:text}
-dialog#lobby::backdrop{background:rgba(8,10,20,.8)}
-#lobby h1{font-size:clamp(32px,7vw,48px);letter-spacing:-2px;margin:0}
-#lobby h2{font-size:18px;margin:20px 0 6px}
-#lobby .eyebrow{font-size:11px;letter-spacing:3px;color:var(--cyan);margin:4px 0 12px}
-#lobby label{display:block;margin-top:10px}
-#lobby label.check{display:flex;align-items:center;gap:8px}
-#lobby label.button{display:inline-block;margin-top:0}
-#lobby input[type=range],#lobby select{width:100%;max-width:320px;font:inherit}
-#lobby ul{margin:0;padding-left:20px;color:#a7afc9}
-#lobby footer{margin-top:16px;color:#a7afc9;font-size:13px}
-#notice{min-height:22px;color:#f7d7a1}
+/* Lobby: space-game start modal. Procedural only (CSS gradients and inline SVG), no fetched assets.
+   Every animation below stops when Reduced motion is checked (#set-reduced-motion) or the OS asks for it. */
+dialog#lobby{--mag:#ff5bd6;--ink:#05060f;--glass:rgba(16,22,44,.62);--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  width:min(560px,calc(100vw - 16px));max-width:none;max-height:calc(100dvh - 16px);overflow:auto;padding:22px 22px 16px;
+  color:inherit;border:1px solid rgba(105,226,211,.38);border-radius:18px;isolation:isolate;
+  background:
+    radial-gradient(120% 60% at 50% -8%,rgba(105,226,211,.20),transparent 62%),
+    radial-gradient(80% 55% at 105% 108%,rgba(255,91,214,.18),transparent 60%),
+    radial-gradient(60% 40% at -10% 70%,rgba(110,120,255,.14),transparent 60%),
+    linear-gradient(180deg,#0a0e21 0%,#05060f 100%);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.03),0 0 48px rgba(105,226,211,.16),0 30px 90px rgba(0,0,0,.7);
+  touch-action:pan-y;scrollbar-width:thin;scrollbar-color:#30374f transparent}
+dialog#lobby::backdrop{background:radial-gradient(circle at 50% 40%,rgba(10,14,34,.55),rgba(3,4,10,.92))}
 
-@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+/* Starfield (eight tiled layers drifting at different rates) and HUD corner brackets. */
+dialog#lobby::before{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;opacity:.85;
+  background-image:
+    radial-gradient(1px 1px at 12% 18%,#fff,transparent),radial-gradient(1px 1px at 68% 9%,#cfe,transparent),
+    radial-gradient(1.5px 1.5px at 38% 72%,#fff,transparent),radial-gradient(1px 1px at 86% 54%,#fdf,transparent),
+    radial-gradient(1px 1px at 22% 88%,#bff,transparent),radial-gradient(1.5px 1.5px at 92% 86%,#fff,transparent),
+    radial-gradient(1px 1px at 52% 38%,#fff,transparent),radial-gradient(1px 1px at 4% 46%,#eef,transparent);
+  background-size:180px 180px,240px 240px,300px 300px,220px 220px,260px 260px,340px 340px,200px 200px,280px 280px;
+  animation:lb-drift 90s linear infinite}
+dialog#lobby::after{content:"";position:absolute;inset:8px;z-index:-1;pointer-events:none;--c:rgba(105,226,211,.7);
+  background:
+    linear-gradient(var(--c),var(--c)) 0 0/18px 2px no-repeat,linear-gradient(var(--c),var(--c)) 0 0/2px 18px no-repeat,
+    linear-gradient(var(--c),var(--c)) 100% 0/18px 2px no-repeat,linear-gradient(var(--c),var(--c)) 100% 0/2px 18px no-repeat,
+    linear-gradient(var(--c),var(--c)) 0 100%/18px 2px no-repeat,linear-gradient(var(--c),var(--c)) 0 100%/2px 18px no-repeat,
+    linear-gradient(var(--c),var(--c)) 100% 100%/18px 2px no-repeat,linear-gradient(var(--c),var(--c)) 100% 100%/2px 18px no-repeat}
+@keyframes lb-drift{to{background-position:-180px 360px,-240px 480px,-300px 600px,-220px 440px,-260px 520px,-340px 680px,-200px 400px,-280px 560px}}
+
+/* Title lockup: tunnel emblem plus two-tone wordmark. */
+#lobby .lockup{display:grid;grid-template-columns:auto 1fr;align-items:center;column-gap:14px;margin:4px 4px 18px}
+#lobby .emblem{grid-row:span 2;width:62px;height:62px;overflow:visible;filter:drop-shadow(0 0 8px rgba(105,226,211,.55))}
+#lobby .emblem .ring{fill:none;stroke:var(--cyan);stroke-width:1.6;transform-box:fill-box;transform-origin:center;animation:lb-rush 2.4s linear infinite}
+#lobby .emblem .r1{opacity:.7;animation:none}
+#lobby .emblem .r2{opacity:.6;animation-delay:-.8s}
+#lobby .emblem .r3{opacity:.9;animation-delay:-1.6s}
+#lobby .emblem .lane{fill:none;stroke:var(--mag);stroke-width:1.4;stroke-linecap:round;opacity:.8}
+#lobby .emblem .ship{fill:#eef1ff;stroke:var(--cyan);stroke-width:1;stroke-linejoin:round}
+@keyframes lb-rush{0%{transform:scale(.3);opacity:0}25%{opacity:.9}100%{transform:scale(1.15);opacity:0}}
+#lobby h1{margin:0;line-height:.9;font-size:clamp(34px,9vw,52px);font-weight:900;font-style:italic;letter-spacing:.06em;text-transform:uppercase}
+#lobby h1 .t1{background:linear-gradient(180deg,#fff 10%,var(--cyan) 90%);-webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 0 10px rgba(105,226,211,.45))}
+#lobby h1 .t2{margin-left:.28em;color:transparent;-webkit-text-stroke:1.5px var(--mag);filter:drop-shadow(0 0 8px rgba(255,91,214,.55))}
+#lobby .eyebrow{margin:6px 0 0;font:700 11px/1 var(--mono);letter-spacing:.32em;text-transform:uppercase;color:#8e9ab9}
+
+/* Shared graphic button look. */
+#lobby button,#lobby .button{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  background:linear-gradient(180deg,rgba(40,50,84,.75),rgba(18,23,44,.85));border:1px solid #39446a;color:#dfe6ff;
+  border-radius:12px;padding:10px 12px;font-weight:700;letter-spacing:.04em;transition:border-color .15s,box-shadow .15s,transform .15s}
+#lobby button:hover:not(:disabled),#lobby .button:hover{border-color:var(--cyan);box-shadow:0 0 14px rgba(105,226,211,.35);
+  background:linear-gradient(180deg,rgba(48,62,104,.85),rgba(20,28,54,.9))}
+#lobby button:active:not(:disabled),#lobby .button:active{transform:translateY(1px)}
+#lobby button:disabled{opacity:.35}
+#lobby svg{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+#lobby svg .solid{fill:currentColor;stroke:none}
+#lobby .icon{flex-direction:column;gap:5px;font-size:11px;text-transform:uppercase;letter-spacing:.12em}
+
+/* Hero Play button plus Retry. */
+#lobby .launch{display:flex;gap:10px;margin:0 0 14px}
+#lobby #play{flex:1;min-height:66px;gap:12px;font-size:24px;letter-spacing:.3em;text-transform:uppercase;color:var(--ink);border:0;
+  background:linear-gradient(100deg,#7ff3e4 0%,var(--cyan) 45%,#7c9bff 100%);
+  box-shadow:0 0 0 1px rgba(255,255,255,.25) inset,0 0 22px rgba(105,226,211,.45);animation:lb-pulse 2.6s ease-in-out infinite}
+#lobby #play::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:linear-gradient(180deg,rgba(255,255,255,.35),transparent 55%)}
+#lobby #play:hover{background:linear-gradient(100deg,#a6fff3 0%,#8ff0e4 45%,#9fb6ff 100%)}
+#lobby #play svg{width:28px;height:28px}
+#lobby #retry{width:84px}
+@keyframes lb-pulse{0%,100%{box-shadow:0 0 0 1px rgba(255,255,255,.25) inset,0 0 18px rgba(105,226,211,.35)}
+  50%{box-shadow:0 0 0 1px rgba(255,255,255,.25) inset,0 0 36px rgba(105,226,211,.75),0 0 70px rgba(124,155,255,.25)}}
+
+/* Monospace data lines (selectable so a seed can be copied). */
+#lobby .data{display:grid;grid-template-columns:1fr 1fr;gap:4px 14px;margin:0 2px 14px;padding:10px 12px;
+  border:1px solid rgba(48,55,79,.9);border-radius:12px;background:rgba(5,8,20,.55);font:12px/1.5 var(--mono);color:#cfd6f2;
+  -webkit-user-select:text;user-select:text}
+#lobby .data div{display:flex;gap:10px;min-width:0}
+#lobby .data .k{flex:none;width:4ch;color:var(--cyan);text-transform:uppercase;letter-spacing:.08em}
+#lobby .data output{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#lobby .data div.wide{grid-column:1/-1}
+#lobby .data div.wide output{white-space:normal;overflow-wrap:anywhere}
+
+/* Key legend chips; hidden on touch screens, where the on-screen controls are visible in play. */
+#lobby .keys{display:flex;flex-wrap:wrap;gap:6px 14px;justify-content:center;margin:0 0 14px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#a7afc9}
+#lobby .keys span{display:inline-flex;align-items:center;gap:6px}
+#lobby kbd{font:700 10px/1 var(--mono);padding:4px 6px;border:1px solid #4c5a82;border-bottom-width:2px;border-radius:5px;background:#10162c;color:#eef1ff}
+@media (pointer:coarse){#lobby .keys{display:none}}
+
+/* Settings panel: four compact tiles. */
+#lobby .settings{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:0 0 14px}
+#lobby .tile{display:flex;flex-direction:column;align-items:center;justify-content:space-between;gap:8px;min-width:0;padding:10px 8px;
+  border:1px solid #2c3554;border-radius:12px;background:var(--glass);font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#cfd6f2}
+#lobby .tile label{display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer}
+#lobby .tile.toggle{cursor:pointer}
+#lobby .tile svg{color:var(--cyan)}
+#lobby #set-music-level-value{font:700 12px/1 var(--mono);color:var(--mag);margin-top:-2px}
+#lobby .tile:has(input:checked){border-color:var(--mag);box-shadow:0 0 12px rgba(255,91,214,.25) inset}
+#lobby .tile:has(input:checked) svg{color:var(--mag)}
+
+/* Range: neon track and thumb. */
+#lobby input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:18px;margin:0;background:transparent;accent-color:var(--cyan);cursor:pointer}
+#lobby input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:4px;background:linear-gradient(90deg,var(--cyan),var(--mag))}
+#lobby input[type=range]::-moz-range-track{height:4px;border-radius:4px;background:linear-gradient(90deg,var(--cyan),var(--mag))}
+#lobby input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;margin-top:-6px;border-radius:50%;background:#eef1ff;border:2px solid var(--cyan);box-shadow:0 0 8px var(--cyan)}
+#lobby input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:#eef1ff;border:2px solid var(--cyan);box-shadow:0 0 8px var(--cyan)}
+
+/* Checkboxes as switches. */
+#lobby input[type=checkbox]{-webkit-appearance:none;appearance:none;position:relative;flex:none;width:38px;height:20px;margin:0;border-radius:20px;
+  border:1px solid #4c5a82;background:#0b0f20;cursor:pointer;transition:background .15s,border-color .15s}
+#lobby input[type=checkbox]::before{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#8e9ab9;transition:transform .15s,background .15s}
+#lobby input[type=checkbox]:checked{background:rgba(255,91,214,.25);border-color:var(--mag)}
+#lobby input[type=checkbox]:checked::before{transform:translateX(18px);background:var(--mag);box-shadow:0 0 8px var(--mag)}
+
+#lobby select{width:100%;font:700 12px/1 var(--mono);text-transform:uppercase;color:#eef1ff;background:#0b0f20;border:1px solid #4c5a82;border-radius:8px;padding:5px 6px;cursor:pointer}
+
+/* Save vault: six icon buttons. */
+#lobby .vault{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin:0}
+#lobby .vault .icon{min-width:0;padding:10px 4px 8px}
+#lobby label.button input[type=file]{left:0;top:0}
+
+#notice{display:block;min-height:18px;margin:10px 2px 0;font:11px/1.5 var(--mono);color:#f7d7a1;text-align:center}
+
+@media (max-width:480px){
+  dialog#lobby{padding:16px 14px 12px}
+  #lobby .lockup{margin:2px 2px 14px}
+  #lobby .emblem{width:50px;height:50px}
+  #lobby .lockup{column-gap:10px}
+  #lobby h1{font-size:clamp(26px,8vw,36px);letter-spacing:.03em}
+  #lobby #play{min-height:60px;font-size:21px}
+  #lobby .data{grid-template-columns:1fr}
+  #lobby .settings{grid-template-columns:repeat(2,1fr)}
+  #lobby .vault{grid-template-columns:repeat(3,1fr)}
+}
+
+/* Reduced motion: honour the lobby setting (the checkbox app.js keeps in sync) and the OS preference. */
+body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *::before,body:has(#set-reduced-motion:checked) *::after{animation:none!important;transition:none!important}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}}

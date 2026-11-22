@@ -1,11 +1,12 @@
 // Client loop (pl-v2). The only module that calls step/abandon on the game. Renderers, HUD,
 // lobby and audio receive read-only rows (map, course, state snapshots, view) from here.
-import {createGame, TICKS_PER_SECOND, MAX_TICKS} from '../src/sim/space_racer.js';
+import {createGame, TICKS_PER_SECOND, MAX_TICKS, WEAPONS} from '../src/sim/space_racer.js';
 import {newSave, importSave, exportSave, STORAGE_KEY} from '../src/state/pilot_state.js';
 import {quantizeStick, keyboardStick, MAX_RADIUS_PX, CAPTURE_RADIUS_PX} from '../src/input/controls.js';
 import {digest} from './digest.js';
 import {Music} from './music.js';
 import {ScoreVoice} from './score_voice.js';
+import {Sfx} from './sfx.js';
 import {renderHud} from './hud.js';
 import {createPause} from './pause.js';
 import {applySetting, defaultSettings, lastResultText, retryEnabled, SETTING_CONTROLS} from './lobby_model.js';
@@ -27,8 +28,9 @@ const notice = message => { $('notice').textContent = message; };
 
 const music = new Music();
 const voice = new ScoreVoice(music);
+const sfx = new Sfx(music);
 let save = null, session = null, game = null, map = null, course = [], view = EMPTY_VIEW;
-let prevState = null, currState = null, lastRun = null, lastSeed = null, seed = randomSeed();
+let prevState = null, currState = null, hudState = null, lastRun = null, lastSeed = null, seed = randomSeed();
 let running = false, recorded = false, accumulator = 0, previousFrame = null, lastActive = Date.now();
 let hops = [], fires = 0, lastSent = [0, 0];
 // Per-tick {p, state, view} rows already produced by step/view, newest last (presentation only).
@@ -225,6 +227,8 @@ function tickOnce() {
   lastActive = Date.now();
   music.beat(t);
   voice.beat(t, currState.lane);
+  // W4c R-2: a fire_ready rise across tick t is the sim's [t, 3, code, shots] event (read-only rows).
+  sfx.tick(prevState, currState, WEAPONS);
   if (currState.status === 'ended') finishRun();
 }
 
@@ -243,7 +247,8 @@ function frame(timestamp) {
   catch (err) {
     if (rendererKind === 'webgl2') { console.warn('WebGL2 draw failed, switching to the 2D fallback:', err?.message ?? err); useFallback('lost'); }
   }
-  if (currState) renderHud(document, currState, map);
+  // W4c R-1: HUD DOM writes only when a tick produced a new state row, not on every frame.
+  if (currState && currState !== hudState) { renderHud(document, currState, map); hudState = currState; }
   requestAnimationFrame(frame);
 }
 

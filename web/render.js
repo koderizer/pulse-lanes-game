@@ -29,10 +29,14 @@ const DESKTOP_FOVY = 66;           // deg, landscape and desktop (unchanged)
 const PORTRAIT_HALF_FOV_X = 40;    // deg, horizontal half-angle the portrait branch aims for (was 37)
 const PORTRAIT_FOVY_MAX = 112;     // deg, portrait vertical ceiling (was 100)
 const RING_DENSITY = 6;            // minor rings per beat segment on the tube wall (was 4)
-const BEAT_SURGE = 4;              // world units the chase camera surges forward on each beat
-const BEAT_BOB = 0.6;              // world units of vertical dolly bob, one cycle per beat
-const BEAT_FOV_KICK = 3;           // deg added to fovy on the beat
-const BEAT_DECAY = 6;              // per-beat exponential decay of surge and FOV kick
+export const BEAT_SURGE = 4;       // world units the chase camera surges forward on each beat
+export const BEAT_BOB = 0.6;       // world units of vertical dolly bob, one cycle per beat
+export const BEAT_FOV_KICK = 3;    // deg added to fovy on the beat
+// FB3-W4c R-1 (ruling R29): the R27 envelope exp(-6 * phase) restarted at 1 on every beat while it
+// had decayed to 0.0025 just before, so surge, FOV kick and tube pulse stepped in a single frame at
+// each beat boundary. The envelope is now a periodic C1 pulse of the beat phase: a smoothstep attack
+// over BEAT_ATTACK of the beat, then a flat-ended decay to exactly 0 with zero slope at phase 1.
+export const BEAT_ATTACK = 0.3;    // fraction of the beat spent rising to the peak
 const LANE_COLORS = [[1.0, 0.35, 0.85], [0.3, 0.95, 0.9], [1.0, 0.72, 0.3], [0.45, 1.0, 0.45], [0.65, 0.5, 1.0]];
 const SHAPE_COLORS = [[0.62, 0.55, 0.5], [0.55, 0.6, 0.68], [0.7, 0.5, 0.42], [0.5, 0.46, 0.42],
   [0.6, 0.56, 0.48], [0.45, 0.42, 0.46], [0.6, 0.7, 0.85], [0.66, 0.5, 0.55]];
@@ -173,6 +177,30 @@ export function fovyFor(aspect) {
   return Math.min(PORTRAIT_FOVY_MAX * DEG, 2 * Math.atan(Math.tan(PORTRAIT_HALF_FOV_X * DEG) / aspect));
 }
 
+// R-1 beat envelope in [0, 1] of the beat phase (any real; only the fractional part is used).
+// Value and first derivative are continuous everywhere, including the beat boundary:
+// e(0) = e(1) = 0 and e'(0) = e'(1) = 0; at the peak (phase BEAT_ATTACK) e = 1 and e' = 0 on both
+// sides. Decay g(u) = (1 - u)^4 (1 + 4u) has g(0) = 1, g'(0) = 0, g(1) = 0, g'(1) = 0.
+export function beatEnvelope(phase) {
+  const f = phase - Math.floor(phase);
+  if (f < BEAT_ATTACK) { const t = f / BEAT_ATTACK; return t * t * (3 - 2 * t); }
+  const u = (f - BEAT_ATTACK) / (1 - BEAT_ATTACK), v = 1 - u;
+  return v * v * v * v * (1 + 4 * u);
+}
+
+// All beat-locked motion cues for presentation beat `beat` (float beats from track.beatsAt(T)),
+// written into `out` so the frame path allocates nothing. surge: world units forward; bob: world
+// units up; fovKick: radians; pulse: tube near-ring glow in [0, 1]. Reduced motion zeroes the
+// motion cues and keeps the (non-motion) glow pulse.
+export function beatCues(beat, reduced, out = {surge: 0, bob: 0, fovKick: 0, pulse: 0}) {
+  const f = beat - Math.floor(beat), e = beatEnvelope(f);
+  out.surge = reduced ? 0 : BEAT_SURGE * e;
+  out.bob = reduced ? 0 : BEAT_BOB * Math.sin(f * 2 * Math.PI);
+  out.fovKick = reduced ? 0 : BEAT_FOV_KICK * DEG * e;
+  out.pulse = e;
+  return out;
+}
+
 // ------------------------------------------------------------------ matrices (column-major)
 const m4 = () => new Float32Array(16);
 function perspective(out, fovy, aspect, near, far) {
@@ -193,8 +221,9 @@ function lookAt(out, eye, target, up) {
   out[12] = -dot(x, eye); out[13] = -dot(y, eye); out[14] = -dot(z, eye); out[15] = 1;
   return out;
 }
+const MUL_TMP = new Float32Array(16);
 function mul(out, a, b) {
-  const r = new Float32Array(16);
+  const r = MUL_TMP;
   for (let c = 0; c < 4; c++) for (let row = 0; row < 4; row++) {
     r[c * 4 + row] = a[row] * b[c * 4] + a[4 + row] * b[c * 4 + 1] + a[8 + row] * b[c * 4 + 2] + a[12 + row] * b[c * 4 + 3];
   }
@@ -608,7 +637,8 @@ export function createRenderer(opts = {}) {
     }
   }
 
-  const VP = m4(), P = m4(), V = m4(), VR = m4(), M = m4();
+  const VP = m4(), P = m4(), V = m4(), VR = m4(), VPR = m4(), M = m4();
+  const cues = {surge: 0, bob: 0, fovKick: 0, pulse: 0};
   const cA = [0, 0, 0], cB = [0, 0, 0];
   let quality = QUALITY[settings.quality] ?? QUALITY.high;
 
@@ -675,12 +705,11 @@ export function createRenderer(opts = {}) {
     camLaneF += (lane - camLaneF) * (dtReal > 0 ? kCam : 1);
     camLaneVel = dtReal > 0 ? (camLaneF - before) / dtReal : 0;
 
-    // ---- beat-locked motion cues (R-1): float envelope of the presentation beat phase only
-    const beat = track.beatsAt(T);
-    const beatPhase = beat - Math.floor(beat);
-    const beatKick = reduced ? 0 : Math.exp(-beatPhase * BEAT_DECAY);
-    const camBack = CAM_BACK - BEAT_SURGE * beatKick;
-    const bob = reduced ? 0 : BEAT_BOB * Math.sin(beatPhase * 2 * Math.PI);
+    // ---- beat-locked motion cues (W4b R-1, W4c R-1): continuous C1 functions of the presentation
+    // beat (T carries alpha, so the phase is not quantized per tick); no allocation here.
+    beatCues(track.beatsAt(T), reduced, cues);
+    const camBack = CAM_BACK - cues.surge;
+    const bob = cues.bob;
 
     // ---- camera
     const cBack = track.centre(camLaneF, sShip - camBack, [0, 0, 0]);
@@ -697,13 +726,13 @@ export function createRenderer(opts = {}) {
     const fwd = normalize([target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]]);
     const R = axisAngle(fwd, roll), up = [R[1][0], R[1][1], R[1][2]];
     const aspect = w / h;
-    const fovy = fovyFor(aspect) + BEAT_FOV_KICK * DEG * beatKick;
+    const fovy = fovyFor(aspect) + cues.fovKick;
     const vis = visDepth();
     perspective(P, fovy, aspect, 0.5, vis + CAM_BACK + 200);
     lookAt(V, eye, target, up);
     mul(VP, P, V);
     VR.set(V); VR[12] = 0; VR[13] = 0; VR[14] = 0;
-    const VPR = mul(m4(), P, VR);
+    mul(VPR, P, VR);
 
     // ---- targets
     const useBloom = quality.bloom && !bloomBroken && ensureTargets(w, h) && targets;
@@ -778,7 +807,7 @@ export function createRenderer(opts = {}) {
     gl.uniform1f(tp.u.uDStart, dStart); gl.uniform1f(tp.u.uDStep, dStep); gl.uniform1f(tp.u.uSShip, sShip);
     gl.uniform1f(tp.u.uRadius, TUBE_R); gl.uniform1f(tp.u.uVis, vis); gl.uniform1f(tp.u.uSeg, SEG);
     gl.uniform1f(tp.u.uRingDensity, RING_DENSITY);
-    gl.uniform1f(tp.u.uPulse, Math.exp(-beatPhase * 5));
+    gl.uniform1f(tp.u.uPulse, cues.pulse);
     gl.bindVertexArray(tube.vao);
     for (let j = 0; j < track.maxLanes; j++) {
       let any = false;
