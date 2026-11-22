@@ -2,6 +2,7 @@
 // one finished-run summary row handed over by the client loop and never touches the sim, the
 // save, storage or the network. All DOM is created here with createElement and textContent
 // (no innerHTML from run data); index.html carries no markup for it.
+import {shipById, shipIdOrDefault, traceOutline, outlineBounds, hexRgb} from './ships.js';
 
 // Tier thresholds over the final score (survived ticks, 0..7200). Each loop section lasts
 // 2400 ticks, so a tier marks how far into the course the run got: SILVER reached loop 2,
@@ -32,7 +33,8 @@ export function flavorText(reason, loops) {
 }
 
 // Plain-number summary from the client loop: {score, ticks, tps, loops, loopCount, lanes, lane,
-// weapon, seed, ruleset, reason, date, maxTicks}. Anything malformed falls back to a safe value.
+// weapon, seed, ruleset, reason, date, maxTicks, ship}. Anything malformed falls back to a safe
+// value; an unknown or missing ship id becomes SHIP_DEFAULT (ships.js).
 export function normalizeResult(r = {}) {
   const int = (v, d = 0) => (Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : d);
   const str = (v, d) => (typeof v === 'string' && v ? v : d);
@@ -42,7 +44,7 @@ export function normalizeResult(r = {}) {
     lanes: Math.min(8, Math.max(1, int(r.lanes, 3))), lane: int(r.lane, 1),
     weapon: str(r.weapon, 'laser'), seed: int(r.seed) >>> 0, ruleset: str(r.ruleset, 'pl-v2'),
     reason: str(r.reason, 'collision'), date: str(r.date, '0000-00-00'), maxTicks: int(r.maxTicks, 7200) || 7200,
-    selfie: r.selfie ?? null,
+    ship: shipIdOrDefault(r.ship), selfie: r.selfie ?? null,
   };
 }
 
@@ -55,12 +57,16 @@ const ART = Object.freeze({x: 66, y: 206, w: 948, h: 640});
 const PORTRAIT = Object.freeze({x: 96, y: 236, w: 272, h: 340});
 const FONT = 'system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
 const MONO = 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
-// Foil stops, ink (text accent) and glow tint per tier.
+// Foil stops, ink (text accent), glow tint and the selfie duotone [shadow, highlight] per tier.
 const TIER_STYLE = {
-  BRONZE: {foil: ['#3d1d0c', '#c9773a', '#ffd6a8', '#8a4a1f', '#e9a267', '#4a2410'], ink: '#ffcf9e', glow: [233, 140, 70]},
-  SILVER: {foil: ['#4b5566', '#c9d3e6', '#ffffff', '#8592a8', '#e6ecf7', '#3e4757'], ink: '#eef3ff', glow: [185, 205, 235]},
-  GOLD: {foil: ['#5e3f08', '#e0a82e', '#fff1b8', '#a8761a', '#ffd76a', '#4d3306'], ink: '#ffe28a', glow: [242, 193, 78]},
-  MYTHIC: {foil: ['#ff5bd6', '#7c9bff', '#69e2d3', '#fff1b8', '#ff5bd6', '#7c9bff'], ink: '#ffffff', glow: [255, 91, 214]},
+  BRONZE: {foil: ['#3d1d0c', '#c9773a', '#ffd6a8', '#8a4a1f', '#e9a267', '#4a2410'], ink: '#ffcf9e', glow: [233, 140, 70],
+    duo: ['#2a1206', '#ffd2a0']},
+  SILVER: {foil: ['#4b5566', '#c9d3e6', '#ffffff', '#8592a8', '#e6ecf7', '#3e4757'], ink: '#eef3ff', glow: [185, 205, 235],
+    duo: ['#141b2e', '#eef4ff']},
+  GOLD: {foil: ['#5e3f08', '#e0a82e', '#fff1b8', '#a8761a', '#ffd76a', '#4d3306'], ink: '#ffe28a', glow: [242, 193, 78],
+    duo: ['#2b1a02', '#ffe9a8']},
+  MYTHIC: {foil: ['#ff5bd6', '#7c9bff', '#69e2d3', '#fff1b8', '#ff5bd6', '#7c9bff'], ink: '#ffffff', glow: [255, 91, 214],
+    duo: ['#3c0b52', '#9ff6ff']},
 };
 const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
 
@@ -259,12 +265,69 @@ function drawTube(ctx, d, style, rng, vx, vy) {
   }
 }
 
-// Ship silhouette from behind (chase view), nose toward the vanishing point, twin engine glow
-// and the weapon of the loop reached (laser beam or rocket trail).
+// FB3-SHIP R-3: plan view of a registry model (ships.js outline, canopy and thrusters), nose up,
+// centred on its outline bounds at (cx, cy) with `scale` px per ship unit. The shapes live only
+// in ships.js; the card and the lobby picker both draw through here. `glow` (a CSS colour) adds a
+// soft halo under the hull; `flame` lights the thrusters.
+export function drawShipPlan(ctx, modelOrId, cx, cy, scale, {glow = null, flame = true} = {}) {
+  const model = typeof modelOrId === 'string' || !modelOrId ? shipById(modelOrId) : modelOrId;
+  const [x0, z0, x1, z1] = outlineBounds(model);
+  const ox = cx - (x0 + x1) / 2 * scale, oy = cy - (z0 + z1) / 2 * scale;
+  const rgb = hex => hexRgb(hex, 255).map(Math.round);
+  const hull = rgb(model.colors.hull), accent = rgb(model.colors.accent), engine = rgb(model.colors.engine);
+  if (flame) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const t of model.thrusters) {
+      const fx = ox + t.x * scale, fy = oy + (t.z + 0.12) * scale, r = Math.max(0.22, t.w) * scale * 1.4;
+      const g = ctx.createRadialGradient(fx, fy, 0, fx, fy, r);
+      g.addColorStop(0, 'rgba(255,255,255,0.95)'); g.addColorStop(0.3, rgba(engine, 0.8)); g.addColorStop(1, rgba(engine, 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(fx, fy, r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+  ctx.save();
+  if (glow) { ctx.shadowColor = glow; ctx.shadowBlur = Math.max(6, scale * 0.35); }
+  traceOutline(ctx, model, ox, oy, scale);
+  const body = ctx.createLinearGradient(0, oy + z0 * scale, 0, oy + z1 * scale);
+  body.addColorStop(0, rgba(hull, 1)); body.addColorStop(0.5, rgba(hull.map(c => Math.round(c * 0.42)), 1)); body.addColorStop(1, '#070912');
+  ctx.fillStyle = body; ctx.fill();
+  ctx.restore();
+  // Deck sheen and spine, clipped to the hull, then the accent trim.
+  ctx.save();
+  traceOutline(ctx, model, ox, oy, scale);
+  ctx.clip();
+  const sheen = ctx.createLinearGradient(ox + x0 * scale, 0, ox + x1 * scale, 0);
+  sheen.addColorStop(0, 'rgba(0,0,0,0.35)'); sheen.addColorStop(0.5, 'rgba(255,255,255,0.22)'); sheen.addColorStop(1, 'rgba(0,0,0,0.35)');
+  ctx.fillStyle = sheen; ctx.fillRect(ox + x0 * scale, oy + z0 * scale, (x1 - x0) * scale, (z1 - z0) * scale);
+  ctx.beginPath(); ctx.moveTo(ox, oy + z0 * scale); ctx.lineTo(ox, oy + z1 * scale);
+  ctx.lineWidth = Math.max(1, scale * 0.02); ctx.strokeStyle = rgba(accent, 0.45); ctx.stroke();
+  for (const t of model.thrusters) {
+    ctx.fillStyle = rgba(engine, 0.9);
+    ctx.fillRect(ox + (t.x - t.w / 2) * scale, oy + (t.z - 0.08) * scale, t.w * scale, 0.16 * scale);
+  }
+  ctx.restore();
+  traceOutline(ctx, model, ox, oy, scale);
+  ctx.lineJoin = 'round'; ctx.lineWidth = Math.max(1, scale * 0.035); ctx.strokeStyle = rgba(accent, 0.95); ctx.stroke();
+  const c = model.canopy, cy0 = oy + c.z * scale;
+  ctx.beginPath(); ctx.ellipse(ox, cy0, c.w * scale, c.l * scale, 0, 0, Math.PI * 2);
+  const canopy = ctx.createLinearGradient(0, cy0 - c.l * scale, 0, cy0 + c.l * scale);
+  canopy.addColorStop(0, rgba(accent, 1)); canopy.addColorStop(1, rgba(hull.map(v => Math.round(v * 0.4)), 1));
+  ctx.fillStyle = canopy; ctx.fill();
+  return model.id;
+}
+
+// Ship from a raised chase view (plan view foreshortened), nose toward the vanishing point, its
+// engine glow and the weapon of the loop reached (laser beam or rocket trail). R-3: the model is
+// the one the run was played with (d.ship, already defaulted by normalizeResult).
+const CARD_SHIP_W = 250, CARD_SHIP_L = 220, CARD_SHIP_TILT = 0.72;
 function drawShip(ctx, d, style, vx, vy) {
+  const model = shipById(d.ship);
+  const [x0, z0, x1, z1] = outlineBounds(model);
+  const scale = Math.min(CARD_SHIP_W / (x1 - x0), CARD_SHIP_L / (z1 - z0)), reach = (z1 - z0) / 2 * scale * CARD_SHIP_TILT;
   const sx = ART.x + ART.w * 0.5, sy = ART.y + ART.h - 150;
   const yaw = Math.max(-0.35, Math.min(0.35, Math.atan2(vx - sx, sy - vy)));
-  const nose = [sx + Math.sin(yaw) * 80, sy - Math.cos(yaw) * 80];
+  const nose = [sx + Math.sin(yaw) * reach, sy - Math.cos(yaw) * reach];
   ctx.beginPath(); ctx.moveTo(nose[0], nose[1]);
   if (d.weapon === 'rocket') {
     ctx.quadraticCurveTo((nose[0] + vx) / 2 + 40, (nose[1] + vy) / 2, vx + (nose[0] - vx) * 0.35, vy + (nose[1] - vy) * 0.35);
@@ -275,27 +338,40 @@ function drawShip(ctx, d, style, vx, vy) {
   }
   ctx.stroke();
   ctx.save();
-  ctx.translate(sx, sy); ctx.rotate(yaw);
+  ctx.translate(sx, sy); ctx.rotate(yaw); ctx.scale(1, CARD_SHIP_TILT);
+  drawShipPlan(ctx, model, 0, 0, scale, {glow: rgba(style.glow, 0.6)});
+  ctx.restore();
+}
+
+// FB3-SHIP R-4: the selfie is never shown raw. Procedural passes on the card ctx only, over the
+// photo already drawn and clipped to (x, y, w, h). No pixel readback and no offscreen canvas, so
+// a large or tainted photo cannot break the card and renderCard stays ctx + data only.
+//   1 duotone: desaturate ('saturation' with grey), map luminance onto the tier highlight
+//     ('multiply'), then lift the shadows to the tier shadow ('screen'): shadow + L * highlight.
+//   2 glow: a tier-coloured bloom rising from the bottom and an inner rim light.
+//   3 scanlines: thin dark rows every SCAN_STEP px.
+//   4 vignette: radial darkening toward the corners.
+const SCAN_STEP = 4, SCAN_H = 2;
+function stylizePortrait(ctx, style, x, y, w, h) {
+  const [shadow, highlight] = style.duo;
+  ctx.save();
+  ctx.globalCompositeOperation = 'saturation'; ctx.fillStyle = '#808080'; ctx.fillRect(x, y, w, h);
+  ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = highlight; ctx.fillRect(x, y, w, h);
+  ctx.globalCompositeOperation = 'screen'; ctx.fillStyle = shadow; ctx.fillRect(x, y, w, h);
+  const bloom = ctx.createRadialGradient(x + w / 2, y + h * 1.05, 0, x + w / 2, y + h * 1.05, h * 0.9);
+  bloom.addColorStop(0, rgba(style.glow, 0.55)); bloom.addColorStop(1, rgba(style.glow, 0));
+  ctx.fillStyle = bloom; ctx.fillRect(x, y, w, h);
   ctx.globalCompositeOperation = 'lighter';
-  for (const ex of [-28, 28]) {
-    const flame = ctx.createRadialGradient(ex, 34, 0, ex, 34, 70);
-    flame.addColorStop(0, 'rgba(255,255,255,0.95)'); flame.addColorStop(0.3, 'rgba(105,226,211,0.8)'); flame.addColorStop(1, 'rgba(105,226,211,0)');
-    ctx.fillStyle = flame; ctx.beginPath(); ctx.arc(ex, 34, 70, 0, Math.PI * 2); ctx.fill();
-  }
-  ctx.globalCompositeOperation = 'source-over';
-  ctx.beginPath();
-  ctx.moveTo(0, -84); ctx.lineTo(34, 4); ctx.lineTo(122, 36); ctx.lineTo(44, 30); ctx.lineTo(0, 46);
-  ctx.lineTo(-44, 30); ctx.lineTo(-122, 36); ctx.lineTo(-34, 4); ctx.closePath();
-  const hull = ctx.createLinearGradient(0, -84, 0, 46);
-  hull.addColorStop(0, '#2b3566'); hull.addColorStop(1, '#070912');
-  ctx.fillStyle = hull; ctx.fill();
-  ctx.lineWidth = 3; ctx.strokeStyle = style.ink; ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(-118, 35); ctx.lineTo(-34, 4); ctx.lineTo(0, -82); ctx.lineTo(34, 4); ctx.lineTo(118, 35);
-  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(105,226,211,0.9)'; ctx.stroke();
-  ctx.beginPath(); ctx.ellipse(0, -16, 11, 24, 0, 0, Math.PI * 2);
-  const canopy = ctx.createLinearGradient(0, -40, 0, 8);
-  canopy.addColorStop(0, '#d9fff9'); canopy.addColorStop(1, '#2a6c80');
-  ctx.fillStyle = canopy; ctx.fill();
+  ctx.shadowColor = rgba(style.glow, 1); ctx.shadowBlur = 22;
+  roundRect(ctx, x, y, w, h, 14);
+  ctx.lineWidth = 5; ctx.strokeStyle = rgba(style.glow, 0.55); ctx.stroke();
+  ctx.restore();
+  ctx.save();
+  ctx.fillStyle = 'rgba(2,3,10,0.3)';
+  for (let sy = y; sy < y + h; sy += SCAN_STEP) ctx.fillRect(x, sy, w, SCAN_H);
+  const vig = ctx.createRadialGradient(x + w / 2, y + h * 0.45, Math.min(w, h) * 0.3, x + w / 2, y + h * 0.45, Math.hypot(w, h) * 0.6);
+  vig.addColorStop(0, 'rgba(2,3,10,0)'); vig.addColorStop(1, 'rgba(2,3,10,0.78)');
+  ctx.fillStyle = vig; ctx.fillRect(x, y, w, h);
   ctx.restore();
 }
 
@@ -304,7 +380,7 @@ function drawPortrait(ctx, img, style) {
   const iw = img.naturalWidth || img.videoWidth || img.width || 0, ih = img.naturalHeight || img.videoHeight || img.height || 0;
   if (!(iw > 0 && ih > 0)) return false;
   ctx.save();
-  ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 24; ctx.shadowOffsetY = 8;
+  ctx.shadowColor = rgba(style.glow, 0.85); ctx.shadowBlur = 34; // tier-coloured outer glow round the foil frame
   roundRect(ctx, x - 9, y - 9, w + 18, h + 18, 20);
   ctx.fillStyle = foil(ctx, style, x, y, x + w, y + h); ctx.fill();
   ctx.restore();
@@ -313,6 +389,7 @@ function drawPortrait(ctx, img, style) {
   ctx.clip();
   const k = Math.max(w / iw, h / ih), dw = iw * k, dh = ih * k; // cover crop, centred
   ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+  stylizePortrait(ctx, style, x, y, w, h);
   const shade = ctx.createLinearGradient(0, y + h * 0.6, 0, y + h);
   shade.addColorStop(0, 'rgba(5,6,15,0)'); shade.addColorStop(1, 'rgba(5,6,15,0.85)');
   ctx.fillStyle = shade; ctx.fillRect(x, y, w, h);
@@ -376,7 +453,7 @@ export function renderCard(ctx, data) {
   drawBadge(ctx, tier, style);
   drawStats(ctx, d, tier, style);
   ctx.restore();
-  return {tier: tier.name, time: formatTime(d.ticks, d.tps), portrait};
+  return {tier: tier.name, time: formatTime(d.ticks, d.tps), portrait, ship: d.ship};
 }
 
 // Icons reuse the lobby stroke style. The SVG namespace is read from an inline SVG already in the

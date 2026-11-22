@@ -121,6 +121,22 @@ dialog#lobby::after{content:"";position:absolute;inset:8px;z-index:-1;pointer-ev
 @keyframes lb-pulse{0%,100%{box-shadow:0 0 0 1px rgba(255,255,255,.25) inset,0 0 18px rgba(105,226,211,.35)}
   50%{box-shadow:0 0 0 1px rgba(255,255,255,.25) inset,0 0 36px rgba(105,226,211,.75),0 0 70px rgba(124,155,255,.25)}}
 
+/* Ship picker (spec 19 SH-2, built by app.js): a horizontal row of buttons, each a silhouette drawn
+   from the ships.js outline plus the short model name. The chosen one (aria-pressed) is lit in
+   magenta, full colour and slightly larger; the rest sit dimmed. Scrolls sideways if it overflows. */
+#lobby .ships{display:flex;gap:8px;margin:0 0 14px;padding:2px;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none}
+#lobby .ships::-webkit-scrollbar{display:none}
+#lobby .ships button.ship{flex:1 1 0;min-width:56px;flex-direction:column;gap:4px;padding:7px 4px 9px;scroll-snap-align:start;
+  font:700 10px/1 var(--mono);letter-spacing:.14em;color:#7d87a8;background:var(--glass);border-color:#2c3554}
+#lobby .ships canvas{display:block;width:100%;max-width:64px;height:auto;aspect-ratio:64/44;opacity:.6;filter:saturate(.8);
+  transition:opacity .15s,filter .15s,transform .15s}
+#lobby .ships button.ship:hover canvas{opacity:.8}
+#lobby .ships button.ship[aria-pressed=true]{color:#fff;border-color:var(--mag);
+  background:linear-gradient(180deg,rgba(255,91,214,.24),rgba(18,23,44,.88));box-shadow:0 0 0 1px var(--mag) inset,0 0 16px rgba(255,91,214,.45)}
+#lobby .ships button.ship[aria-pressed=true] canvas{opacity:1;filter:drop-shadow(0 0 5px rgba(255,91,214,.55));transform:scale(1.08)}
+#lobby .ships button.ship[aria-pressed=true]::after{content:"";position:absolute;left:32%;right:32%;bottom:3px;height:2px;border-radius:2px;
+  background:var(--mag);box-shadow:0 0 6px var(--mag)}
+
 /* Monospace data lines (selectable so a seed can be copied). */
 #lobby .data{display:grid;grid-template-columns:1fr 1fr;gap:4px 14px;margin:0 2px 14px;padding:10px 12px;
   border:1px solid rgba(48,55,79,.9);border-radius:12px;background:rgba(5,8,20,.55);font:12px/1.5 var(--mono);color:#cfd6f2;
@@ -179,6 +195,8 @@ dialog#lobby::after{content:"";position:absolute;inset:8px;z-index:-1;pointer-ev
   #lobby h1{font-size:clamp(26px,8vw,36px);letter-spacing:.03em}
   #lobby #play{min-height:60px;font-size:21px}
   #lobby .data{grid-template-columns:1fr}
+  #lobby .ships{gap:5px}
+  #lobby .ships button.ship{min-width:50px;padding:6px 2px 8px;letter-spacing:.06em}
   #lobby .settings{grid-template-columns:repeat(2,1fr)}
   #lobby .vault{grid-template-columns:repeat(3,1fr)}
 }

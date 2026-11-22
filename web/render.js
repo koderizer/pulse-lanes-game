@@ -7,6 +7,7 @@
 // Lanes are parallel tubes side by side, lane j centred at x = j * LANE_SPACING (lane 0
 // leftmost). Each tube centreline is integrated from its curve vectors per beat segment
 // and is periodic with the lane length, so the tunnel repeats every `length` beats.
+import {SHIPS, shipById, hexRgb} from './ships.js';
 
 export const MU = 1000;
 export const SEG = 120;            // world units per beat segment along the tube
@@ -37,6 +38,19 @@ export const BEAT_FOV_KICK = 3;    // deg added to fovy on the beat
 // each beat boundary. The envelope is now a periodic C1 pulse of the beat phase: a smoothstep attack
 // over BEAT_ATTACK of the beat, then a flat-ended decay to exactly 0 with zero slope at phase 1.
 export const BEAT_ATTACK = 0.3;    // fraction of the beat spent rising to the peak
+// FB3-SHIP R-5 (spec 19 SH-4): asteroid read distance. The sim streams asteroids from SPAWN_Z
+// (360 units); these shape how they fade in and gain contrast. All fractions are of visDepth().
+export const MESH_FOG_NEAR = 0.3;     // asteroid fog ramp start (was 0.45): wider, softer ramp
+export const MESH_FOG_MIN = 0.55;     // shading kept at the far end (was 0.38): brighter far reads
+export const MESH_HAZE = [0.05, 0.065, 0.1]; // far haze lift on asteroids (was none): silhouette vs void
+export const EXIST_RAMP = 48;         // units over which a new asteroid fades in from spawn depth (was 0: pop)
+export const TUBE_FOG_NEAR = 0.45;    // tube fog ramp start (unchanged)
+export const TUBE_FOG_MID = 0.9;      // tube ramp reaches its floor here (was: fades to 0 at 1.0)
+export const TUBE_FAR = 0.22;         // tube glow floor out to the spawn band (was 0): rocks occlude grid
+export const TUBE_MINOR_FADE = [0.5, 0.85]; // minor rings thin out with depth (was none): no far moire
+const BG = [0.012, 0.016, 0.04];      // clear colour; asteroids fade in from it
+const SHIP_SCALE = 6.5;               // world units per ship-local unit (unchanged from the W4 mesh)
+const glf = v => v.toFixed(4);
 const LANE_COLORS = [[1.0, 0.35, 0.85], [0.3, 0.95, 0.9], [1.0, 0.72, 0.3], [0.45, 1.0, 0.45], [0.65, 0.5, 1.0]];
 const SHAPE_COLORS = [[0.62, 0.55, 0.5], [0.55, 0.6, 0.68], [0.7, 0.5, 0.42], [0.5, 0.46, 0.42],
   [0.6, 0.56, 0.48], [0.45, 0.42, 0.46], [0.6, 0.7, 0.85], [0.66, 0.5, 0.55]];
@@ -326,10 +340,58 @@ function buildShapes() {
   return [flatMesh(icoTris()), flatMesh(dodecaTris()), flatMesh(octaTris()), rock(3, 0.16, [1, 1, 1]),
     rock(4, 0.12, [1.15, 0.72, 0.95]), rock(5, 0.26, [1, 1.05, 0.9]), flatMesh(shardTris()), twinMesh];
 }
-function shipMesh() {
-  const nose = [0, 0, -1.7], lw = [-1.25, -0.12, 0.7], rw = [1.25, -0.12, 0.7], top = [0, 0.38, 0.25], bot = [0, -0.28, 0.4], tail = [0, 0.05, 0.85];
-  return flatMesh([[nose, top, lw], [nose, rw, top], [nose, lw, bot], [nose, bot, rw], [lw, top, tail], [top, rw, tail], [lw, tail, bot], [tail, rw, bot]],
-    false, [0, 0, 0.05]);
+// FB3-SHIP R-1: ship hull as an extruded plate of the model's plan view outline (ships.js).
+// Ear clipping of a simple polygon given as [x, z] points; returns index triples.
+export function triangulate(pts) {
+  const n = pts.length;
+  let area = 0;
+  for (let i = 0; i < n; i++) { const p = pts[i], q = pts[(i + 1) % n]; area += p[0] * q[1] - q[0] * p[1]; }
+  const sign = area >= 0 ? 1 : -1;
+  const crossAt = (a, b, c) => ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) * sign;
+  const inside = (p, a, b, c) => crossAt(a, b, p) >= 0 && crossAt(b, c, p) >= 0 && crossAt(c, a, p) >= 0;
+  const idx = Array.from({length: n}, (_, i) => i), tris = [];
+  let guard = n * n;
+  while (idx.length > 3 && guard-- > 0) {
+    let clipped = false;
+    for (let k = 0; k < idx.length; k++) {
+      const ia = idx[(k + idx.length - 1) % idx.length], ib = idx[k], ic = idx[(k + 1) % idx.length];
+      const a = pts[ia], b = pts[ib], c = pts[ic];
+      if (crossAt(a, b, c) <= 1e-12) continue;
+      let blocked = false;
+      for (const j of idx) if (j !== ia && j !== ib && j !== ic && inside(pts[j], a, b, c)) { blocked = true; break; }
+      if (blocked) continue;
+      tris.push([ia, ib, ic]); idx.splice(k, 1); clipped = true; break;
+    }
+    if (!clipped) break;
+  }
+  if (idx.length === 3) tris.push([idx[0], idx[1], idx[2]]);
+  return tris;
+}
+
+// Interleaved (pos3, normal3) Float32Array in ship-local units: top and bottom faces from the ear
+// clipped outline plus one side wall quad per outline edge. The plate is `height` thick at the
+// centreline and thins toward the wing tips; the belly sits flatter than the deck.
+export function shipPlateMesh(model) {
+  const pts = model.outline, n = pts.length, H = model.height;
+  let maxX = 1e-6, area = 0;
+  for (let i = 0; i < n; i++) { const p = pts[i], q = pts[(i + 1) % n]; maxX = Math.max(maxX, Math.abs(p[0])); area += p[0] * q[1] - q[0] * p[1]; }
+  const top = pts.map(([x, z]) => [x, H * (1 - 0.7 * Math.abs(x) / maxX), z]);
+  const bot = pts.map(([x, z]) => [x, -0.55 * H * (1 - 0.7 * Math.abs(x) / maxX), z]);
+  const tris = triangulate(pts), out = new Float32Array((tris.length * 2 + n * 2) * 18);
+  let o = 0;
+  const emit = (a, b, c, want) => {
+    let nn = normalize(cross([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]));
+    if (dot(nn, want) < 0) { [b, c] = [c, b]; nn = [-nn[0], -nn[1], -nn[2]]; }
+    for (const p of [a, b, c]) { out[o++] = p[0]; out[o++] = p[1]; out[o++] = p[2]; out[o++] = nn[0]; out[o++] = nn[1]; out[o++] = nn[2]; }
+  };
+  for (const [i, j, k] of tris) { emit(top[i], top[j], top[k], [0, 1, 0]); emit(bot[i], bot[j], bot[k], [0, -1, 0]); }
+  const s = area >= 0 ? 1 : -1;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n, dx = pts[j][0] - pts[i][0], dz = pts[j][1] - pts[i][1];
+    const outward = [dz * s, 0, -dx * s];
+    emit(top[i], top[j], bot[j], outward); emit(top[i], bot[j], bot[i], outward);
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------ shaders
@@ -348,6 +410,7 @@ void main() {
   vS = uSShip + d; vAng = aGrid.y; vD = d; vExist = r.z;
   gl_Position = uVP * vec4(p, 1.0);
 }`;
+// FB3-SHIP R-5 tube fog: floor TUBE_FAR out to the spawn band, then out by visDepth.
 const TUBE_FS = `#version 300 es
 precision highp float;
 in float vS; in float vAng; in float vD; in float vExist;
@@ -364,7 +427,9 @@ void main() {
   float minor = gridLine(vS * uRingDensity / uSeg, 1.1);
   float beat = gridLine(vS / uSeg, 2.2);
   float lon = gridLine(vAng * 16.0 / 6.2831853, 1.0);
-  float fog = 1.0 - fadeRange(uVis * 0.45, uVis, vD);
+  minor *= 1.0 - fadeRange(uVis * ${glf(TUBE_MINOR_FADE[0])}, uVis * ${glf(TUBE_MINOR_FADE[1])}, vD);
+  float fog = mix(1.0, ${glf(TUBE_FAR)}, fadeRange(uVis * ${glf(TUBE_FOG_NEAR)}, uVis * ${glf(TUBE_FOG_MID)}, vD))
+    * (1.0 - fadeRange(uVis * ${glf(TUBE_FOG_MID)}, uVis, vD));
   float behind = fadeRange(-70.0, -10.0, vD);
   float nearPulse = uPulse * (1.0 - fadeRange(0.0, 160.0, vD));
   float glow = 0.035 + 0.28 * minor + 0.32 * lon + beat * (0.75 + 1.6 * nearPulse);
@@ -378,8 +443,8 @@ void main() { vec4 w = uM * vec4(aPos, 1.0); vW = w.xyz; vN = mat3(uM) * aNor; g
 const MESH_FS = `#version 300 es
 precision highp float;
 in vec3 vN; in vec3 vW;
-uniform vec3 uColor, uEmit, uCam;
-uniform float uFogFar, uFogMin;
+uniform vec3 uColor, uEmit, uCam, uHaze;
+uniform float uFogFar, uFogMin, uExist;
 out vec4 o;
 float fadeRange(float a, float b, float x) { float t = clamp((x - a) / (b - a), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
 void main() {
@@ -389,8 +454,11 @@ void main() {
   float fill = max(dot(n, normalize(vec3(0.6, -0.3, 0.5))), 0.0) * 0.3;
   float rim = pow(1.0 - max(dot(n, v), 0.0), 2.5);
   vec3 c = uColor * (0.14 + 0.85 * diff + fill) + uColor * rim * 0.7 + uEmit;
-  float fog = mix(1.0, uFogMin, fadeRange(uFogFar * 0.45, uFogFar, -vW.z));
-  o = vec4(c * fog, 1.0);
+  // R-5: far objects keep uFogMin of their shading plus a faint haze lift (uHaze is zero outside
+  // the asteroid pass), and uExist fades a new asteroid in from the clear colour.
+  float t = fadeRange(uFogFar * ${glf(MESH_FOG_NEAR)}, uFogFar, -vW.z);
+  vec3 col = mix(c, c * uFogMin + uHaze, t);
+  o = vec4(mix(vec3(${BG.map(glf).join(', ')}), col, uExist), 1.0);
 }`;
 const STAR_VS = `#version 300 es
 in vec4 aStar;
@@ -452,7 +520,7 @@ export function createRenderer(opts = {}) {
     return {p, u};
   };
 
-  const meshProg = program(MESH_VS, MESH_FS, ['uVP', 'uM', 'uColor', 'uEmit', 'uCam', 'uFogFar', 'uFogMin']);
+  const meshProg = program(MESH_VS, MESH_FS, ['uVP', 'uM', 'uColor', 'uEmit', 'uCam', 'uFogFar', 'uFogMin', 'uHaze', 'uExist']);
   const starProg = program(STAR_VS, STAR_FS, ['uVPRot', 'uScale']);
   const brightProg = program(FS_VS, BRIGHT_FS, ['uTex']);
   const blurProg = program(FS_VS, BLUR_FS, ['uTex', 'uDir']);
@@ -471,7 +539,10 @@ export function createRenderer(opts = {}) {
     return {vao, count: data.length / 6};
   };
   const shapes = buildShapes().map(meshVao);
-  const ship = meshVao(shipMesh());
+  // R-1: one hull VAO per registry model, built once; colours parsed once (no per-frame work).
+  const shipKits = new Map(SHIPS.map(m => [m.id, {model: m, mesh: meshVao(shipPlateMesh(m)),
+    hull: hexRgb(m.colors.hull), accent: hexRgb(m.colors.accent), engine: hexRgb(m.colors.engine)}]));
+  let shipKit = shipKits.get(shipById(opts.ship).id);
   const octa = meshVao(flatMesh(octaTris()));
   const emptyVao = gl.createVertexArray();
 
@@ -657,6 +728,22 @@ export function createRenderer(opts = {}) {
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
   }
+  // Scalar variant for the R-1/R-5 paths: no colour arrays are built per draw.
+  function drawMesh6(mesh, model, r, g, b, er, eg, eb) {
+    gl.uniformMatrix4fv(meshProg.u.uM, false, model);
+    gl.uniform3f(meshProg.u.uColor, r, g, b);
+    gl.uniform3f(meshProg.u.uEmit, er, eg, eb);
+    gl.bindVertexArray(mesh.vao);
+    gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
+  }
+  // Ship-local point (x, y, z) * SHIP_SCALE -> world, using the frame's ship basis.
+  const shipBasis = {pos: [0, 0, 0], right: [1, 0, 0], up: [0, 1, 0], back: [0, 0, 1]};
+  const shipPt = [0, 0, 0];
+  const toWorld = (x, y, z) => {
+    const {pos, right, up, back} = shipBasis, k = SHIP_SCALE;
+    for (let i = 0; i < 3; i++) shipPt[i] = pos[i] + (right[i] * x + up[i] * y + back[i] * z) * k;
+    return shipPt;
+  };
 
   function draw(frame = {}) {
     if (gl.isContextLost()) return;
@@ -757,11 +844,15 @@ export function createRenderer(opts = {}) {
     gl.uniformMatrix4fv(meshProg.u.uVP, false, VP);
     gl.uniform3fv(meshProg.u.uCam, eye);
     gl.uniform1f(meshProg.u.uFogFar, vis);
-    gl.uniform1f(meshProg.u.uFogMin, 0.38);
+    gl.uniform1f(meshProg.u.uFogMin, MESH_FOG_MIN);
+    gl.uniform3f(meshProg.u.uHaze, MESH_HAZE[0], MESH_HAZE[1], MESH_HAZE[2]);
+    const spawnD = spawnZ / MU;
     for (const [id, e] of live) {
       const row = e.row, speed = e.speed || 3600;
       const d = (row[3] - T) * speed / MU;
       if (e.passing && d < -BEHIND) { live.delete(id); continue; }
+      // R-5: fade in from the clear colour over EXIST_RAMP units after spawn depth (no pop-in).
+      gl.uniform1f(meshProg.u.uExist, 1 - hermite(spawnD - EXIST_RAMP, spawnD, d));
       track.centreInt(row[2], sShip + d, cA);
       e.pos[0] = cA[0] + row[9] / MU; e.pos[1] = cA[1] + row[10] / MU; e.pos[2] = -d;
       if (!e.axis) {
@@ -781,6 +872,8 @@ export function createRenderer(opts = {}) {
       drawMesh(shapes[row[8] % 8], M, e.color.map(c => c * dim),
         [e.flash * 1.2 + warn * 1.0, e.flash * 0.8 + warn * 0.25, e.flash * 0.5 + warn * 0.15]);
     }
+    gl.uniform1f(meshProg.u.uExist, 1);
+    gl.uniform3f(meshProg.u.uHaze, 0, 0, 0);
     let shipPos = null;
     if (alive) {
       track.centre(shipLaneF, sShip, cA);
@@ -792,10 +885,21 @@ export function createRenderer(opts = {}) {
       const rb = axisAngle(f, bank);
       const rot = v => [rb[0][0] * v[0] + rb[1][0] * v[1] + rb[2][0] * v[2], rb[0][1] * v[0] + rb[1][1] * v[1] + rb[2][1] * v[2], rb[0][2] * v[0] + rb[1][2] * v[1] + rb[2][2] * v[2]];
       right = rot(right); upv = rot(upv);
-      modelBasis(M, shipPos, right, upv, [-f[0], -f[1], -f[2]], 6.5);
+      const back = shipBasis.back;
+      back[0] = -f[0]; back[1] = -f[1]; back[2] = -f[2];
+      shipBasis.pos = shipPos; shipBasis.right = right; shipBasis.up = upv;
+      modelBasis(M, shipPos, right, upv, back, SHIP_SCALE);
       const locked = curr ? curr.locked_until > curr.processed : false;
       const pulse = locked ? 0.5 + 0.5 * Math.sin(effectTime * 18) : 0;
-      drawMesh(ship, M, [0.35 + pulse * 0.6, 0.85 - pulse * 0.4, 0.95 - pulse * 0.5], [0.03 + pulse * 0.3, 0.12, 0.14]);
+      // R-1: the selected model's hull; the exhaust-lock pulse still swings it toward warning red.
+      const {mesh, hull, accent, model} = shipKit;
+      drawMesh6(mesh, M, Math.max(0, hull[0] + pulse * 0.6), Math.max(0, hull[1] - pulse * 0.4), Math.max(0, hull[2] - pulse * 0.5),
+        hull[0] * 0.09 + pulse * 0.3, hull[1] * 0.14, hull[2] * 0.15);
+      // Canopy bubble on the deck, in the accent colour.
+      const cp = model.canopy;
+      const cw = toWorld(0, model.height * 0.85, cp.z);
+      modelBasis(M, cw, right, upv, back, cp.w * SHIP_SCALE, model.height * 0.55 * SHIP_SCALE, cp.l * SHIP_SCALE);
+      drawMesh6(octa, M, accent[0] * 0.55, accent[1] * 0.55, accent[2] * 0.55, accent[0] * 0.22, accent[1] * 0.22, accent[2] * 0.22);
     }
 
     // ---- additive: tubes, engine, rockets, beams, particles
@@ -826,9 +930,13 @@ export function createRenderer(opts = {}) {
     gl.useProgram(meshProg.p);
     const zero = [0, 0, 0];
     if (shipPos) {
-      const g = 0.8 + 0.2 * Math.sin(effectTime * 30);
-      modelBasis(M, [shipPos[0], shipPos[1], 5.2], [1, 0, 0], [0, 1, 0], [0, 0, 1], 1.6 * g, 1.1 * g, 2.6 * g);
-      drawMesh(octa, M, zero, [0.25, 0.85, 1.0]);
+      // R-1: one engine glow per thruster rect of the selected model, in its engine colour.
+      const g = 0.8 + 0.2 * Math.sin(effectTime * 30), {engine, model} = shipKit;
+      const {right, up, back} = shipBasis;
+      for (const t of model.thrusters) {
+        modelBasis(M, toWorld(t.x, t.y, t.z - 0.05), right, up, back, t.w * 0.6 * SHIP_SCALE * g, t.h * 1.05 * SHIP_SCALE * g, 2.6 * g);
+        drawMesh6(octa, M, 0, 0, 0, engine[0], engine[1], engine[2]);
+      }
     }
     // Rockets at presentation time T (same clock as ship and asteroids), every frame until resolved.
     for (const r of curr ? sampleRockets(rocketHist, T) : []) {
@@ -911,6 +1019,9 @@ export function createRenderer(opts = {}) {
     setCourse(map, rows) { track = createTrack(map); course = Array.isArray(rows) ? rows : []; resetRun(); shipLaneF = camLaneF = 1; },
     setSettings(next) { settings = {...settings, ...(next ?? {})}; },
     setSpawnZ(z) { if (Number.isFinite(z) && z > 0) spawnZ = z; },
+    // R-1: unknown ids fall back to the default model. Returns the id actually in use.
+    setShip(modelId) { shipKit = shipKits.get(shipById(modelId).id); return shipKit.model.id; },
+    shipId: () => shipKit.model.id,
     visibleDepthMu: () => visDepth() * MU,
     onContextLost(fn) { lostHandler = typeof fn === 'function' ? fn : null; },
     draw,

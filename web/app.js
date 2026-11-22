@@ -12,7 +12,8 @@ import {createPause} from './pause.js';
 import {applySetting, defaultSettings, lastResultText, retryEnabled, SETTING_CONTROLS} from './lobby_model.js';
 import {createRenderer} from './render.js';
 import {createRenderer2d} from './render2d.js';
-import {createGameOver} from './gameover.js';
+import {createGameOver, drawShipPlan} from './gameover.js';
+import {SHIPS, SHIP_KEY, shipIdOrDefault, outlineBounds} from './ships.js';
 
 const BUILD = 'pl-web-0.2.0';
 // Spec section 2 SPAWN_Z (mu). The sim module keeps this constant private, so it is handed to the
@@ -41,6 +42,9 @@ const TRAIL_TICKS = 24;
 let trail = [];
 const held = {w: false, a: false, s: false, d: false};
 let stickPointer = null, touchStick = [0, 0];
+// Ship model (spec 19, ruling R33): the lobby choice, and the model locked in when a run starts
+// (that one goes on the card). Presentation only; the sim never sees it.
+let shipId = shipIdOrDefault(null), runShip = shipId;
 
 // ------------------------------------------------------------------ renderer selection (spec 12)
 let renderer = null, rendererKind = 'unknown';
@@ -52,6 +56,7 @@ function useFallback(reason) {
   let canvas = $('canvas');
   if (rendererKind === 'webgl2' || reason !== 'forced') { const fresh = canvas.cloneNode(false); canvas.replaceWith(fresh); canvas = fresh; }
   renderer = createRenderer2d({canvas, settings: settingsNow(), spawnZ: SPAWN_Z});
+  renderer.setShip?.(shipId);
   rendererKind = 'fallback2d';
   if (map) renderer.setCourse(map, running || game ? course : []);
   showRendererKind();
@@ -62,7 +67,8 @@ function initRenderer() {
   if (forced) return useFallback('forced');
   try {
     // One WebGL2 attempt only. Any failure (no context, shader or link error) selects the fallback.
-    renderer = createRenderer({canvas: $('canvas'), settings: settingsNow(), spawnZ: SPAWN_Z, onLost: () => useFallback('lost')});
+    renderer = createRenderer({canvas: $('canvas'), settings: settingsNow(), spawnZ: SPAWN_Z, ship: shipId, onLost: () => useFallback('lost')});
+    renderer.setShip?.(shipId);
     rendererKind = 'webgl2';
     showRendererKind();
   } catch (err) {
@@ -144,6 +150,53 @@ function closeLobby() {
 }
 lobby.addEventListener('cancel', event => event.preventDefault()); // Escape never closes the lobby without a run
 
+// Ship picker (spec 19 SH-2, ruling R33): one button per registry model with a canvas silhouette
+// drawn from its outline (gameover.js drawShipPlan, so the shapes live only in ships.js). Buttons
+// only, no input or select; the DOM is built here so index.html stays unchanged. The choice
+// lives in its own localStorage key (SHIP_KEY), never in the pilot save.
+const shipButtons = [];
+function loadShip() {
+  try { return shipIdOrDefault(localStorage.getItem(SHIP_KEY)); } catch { return shipIdOrDefault(null); }
+}
+function showShip() { for (const b of shipButtons) b.setAttribute('aria-pressed', String(b.dataset.ship === shipId)); }
+function chooseShip(id) {
+  shipId = shipIdOrDefault(id);
+  try { localStorage.setItem(SHIP_KEY, shipId); } catch { /* the choice still applies until the page closes */ }
+  renderer?.setShip?.(shipId);
+  showShip();
+}
+function buildShipPicker() {
+  const section = document.createElement('section');
+  section.className = 'ships';
+  section.setAttribute('aria-label', 'Ship');
+  const dpr = Math.min(3, Math.max(1, Number(window.devicePixelRatio) || 1)), W = 64, H = 44;
+  for (const m of SHIPS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ship';
+    b.dataset.ship = m.id;
+    b.title = m.blurb;
+    b.setAttribute('aria-label', `${m.name}: ${m.blurb}`);
+    const art = document.createElement('canvas');
+    art.width = W * dpr; art.height = H * dpr;
+    art.setAttribute('aria-hidden', 'true');
+    const ctx = art.getContext('2d');
+    if (ctx) {
+      const [x0, z0, x1, z1] = outlineBounds(m);
+      ctx.scale(dpr, dpr);
+      drawShipPlan(ctx, m, W / 2, H / 2, Math.min((W - 8) / (x1 - x0), (H - 6) / (z1 - z0)));
+    }
+    const name = document.createElement('span');
+    name.textContent = m.name;
+    b.append(art, name);
+    b.addEventListener('click', () => chooseShip(m.id));
+    shipButtons.push(b);
+    section.append(b);
+  }
+  lobby.querySelector('.launch').after(section);
+  showShip();
+}
+
 // Game over (spec 18 GO-1, ruling R31): a finished run shows this modal first; Back to lobby
 // (or Escape) dismisses it and opens the lobby exactly as before. No run is in progress while
 // it is open. Idle timeouts leave an open game over modal in place instead of yanking it.
@@ -181,6 +234,7 @@ function start(nextSeed) {
   music.reset(); voice.setMap(map);
   beginSession(); music.gesture(); persist();
   renderer.setCourse(map, course);
+  runShip = shipId; renderer.setShip?.(runShip);
   applySettingsToOutputs();
   pause.runStarted();
   closeLobby();
@@ -194,7 +248,7 @@ function finishRun() {
   gameOver.show({
     score: s.score, ticks: s.terminal_tick, tps: TICKS_PER_SECOND, maxTicks: MAX_TICKS,
     loops: s.loop + 1, loopCount: map?.loops?.length ?? 3, lanes: s.lane_count, lane: s.lane, weapon: s.weapon,
-    seed: s.seed, ruleset: s.ruleset_id, reason: s.terminal_reason, date: now().slice(0, 10),
+    seed: s.seed, ruleset: s.ruleset_id, reason: s.terminal_reason, date: now().slice(0, 10), ship: runShip,
   });
 }
 
@@ -367,6 +421,8 @@ try {
     else notice(`Existing save was not changed: ${result.code}.`);
   }
 } catch { save = newSave(crypto.randomUUID()); notice('Local storage unavailable. Use Export save to keep your runs.'); }
+shipId = runShip = loadShip(); // before the renderer exists, so the first frame shows the chosen ship
+buildShipPicker();
 initRenderer();
 // Lobby backdrop: the course of the shown seed, cruising without asteroids (presentation only).
 map = createGame(seed).map();
