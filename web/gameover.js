@@ -936,8 +936,13 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
     result = normalizeResult(raw);
     const v3 = isV3(result);
     // pl-v3: record iff the distance strictly beats the best stored before this run's card.
-    if (v3) result.record = isNewRecord(result.distance, readBest(storage));
     bestCommitted = false;
+    if (v3) {
+      result.record = isNewRecord(result.distance, readBest(storage));
+      // R35.16.4: the record commits when game over shows, not when a card is drawn, so a
+      // skipped card cannot leave a stale best for a later lower finish to also read NEW RECORD.
+      if (result.record) { bestCommitted = true; writeBest(storage, result); }
+    }
     const tier = cardTier(result);
     const [kicker, headline] = HEADLINES[result.reason] ?? HEADLINES.collision;
     eyebrow.textContent = v3 && result.record ? 'New record' : kicker;

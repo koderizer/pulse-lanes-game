@@ -366,7 +366,8 @@ function start(nextSeed) {
   if (!save) return notice('Import a valid save or choose New empty save before playing.');
   if (running) stopRun();
   // A challenge banner stays while its seed is played (Play, then Retry); any other seed ends it.
-  if (challenge && nextSeed !== challenge.seed) { challenge = null; showChallenge(); }
+  // R35.16.7: a challenge is its seed AND its mode (R35.6); switching the lobby mode ends it too.
+  if (challenge && (nextSeed !== challenge.seed || (challenge.mode != null && challenge.mode !== modeId))) { challenge = null; showChallenge(); }
   lastSeed = nextSeed;
   runRuleset = challenge?.ruleset === 'pl-v2' && challenge.seed === nextSeed ? 'pl-v2' : 'pl-v3';
   if (runRuleset === 'pl-v3') {
