@@ -1,14 +1,20 @@
-// Game over flow (spec section 18 GO-1..GO-4, ruling R31). Presentation only: this module reads
-// one finished-run summary row handed over by the client loop and never touches the sim, the
-// save, storage or the network. All DOM is created here with createElement and textContent
-// (no innerHTML from run data); index.html carries no markup for it.
+// Game over flow (spec section 18 GO-1..GO-4, ruling R31; pl-v3 card spec 22, ruling R35).
+// Presentation only: this module reads one finished-run summary row handed over by the client
+// loop and never touches the sim, the save or the network. The only storage it touches is the
+// best distance store pl-best-v1 (R35.7), read when the game over modal opens and written by the
+// controller after a record card has been drawn; renderCard itself stays pure. All DOM is created
+// here with createElement and textContent (no innerHTML from run data); index.html carries no
+// markup for it.
 import {shipById, shipIdOrDefault, traceOutline, outlineBounds, hexRgb} from './ships.js';
 import {qrMatrix} from './qr.js';
 import {encodeChallenge} from './challenge.js';
+import {formatKm, MODE_LABELS} from './hud.js';
+import {MODES} from '../src/sim/space_racer_v3.js';
 
-// Tier thresholds over the final score (survived ticks, 0..7200). Each loop section lasts
+// pl-v2 tier thresholds over the final score (survived ticks, 0..7200). Each loop section lasts
 // 2400 ticks, so a tier marks how far into the course the run got: SILVER reached loop 2,
-// GOLD reached loop 3, MYTHIC cleared the whole course. Highest first.
+// GOLD reached loop 3, MYTHIC cleared the whole course. Highest first. Only legacy pl-v2 runs
+// (a decoded v1 challenge) use these.
 export const TIERS = Object.freeze([
   Object.freeze({name: 'MYTHIC', min: 7200}),
   Object.freeze({name: 'GOLD', min: 4800}),
@@ -16,6 +22,56 @@ export const TIERS = Object.freeze([
   Object.freeze({name: 'BRONZE', min: 0}),
 ]);
 export function tierFor(score) { return TIERS.find(t => score >= t.min) ?? TIERS[TIERS.length - 1]; }
+
+// pl-v3 tier bands by KM (spec 22): < 3000 BRONZE, < 6000 SILVER, < 9000 GOLD, >= 9000 PLATINUM.
+// MYTHIC is not a band: it is reserved for a record card (finished distance strictly greater than
+// the saved best, see BEST_KEY), and a non-record card keeps its band even at high distance.
+export const RULESET_V3 = 'pl-v3';
+export const KM_TIERS = Object.freeze([
+  Object.freeze({name: 'PLATINUM', min: 9000}),
+  Object.freeze({name: 'GOLD', min: 6000}),
+  Object.freeze({name: 'SILVER', min: 3000}),
+  Object.freeze({name: 'BRONZE', min: 0}),
+]);
+export const MYTHIC_TIER = Object.freeze({name: 'MYTHIC', min: null});
+// R35.11: KM = floor(distance / 1000); the raw mu integer stays in the payload and the store.
+export const kmOf = distance => (Number.isSafeInteger(distance) && distance > 0 ? Math.floor(distance / 1000) : 0);
+export function kmTierFor(km) { return KM_TIERS.find(t => km >= t.min) ?? KM_TIERS[KM_TIERS.length - 1]; }
+const isV3 = d => d.ruleset === RULESET_V3;
+// The tier a normalized result is drawn with: pl-v3 MYTHIC on a record card, else its KM band;
+// pl-v2 by survived ticks.
+export function cardTier(d) {
+  if (!isV3(d)) return tierFor(d.score);
+  return d.record ? MYTHIC_TIER : kmTierFor(kmOf(d.distance));
+}
+
+// Best distance store (R35.7, spec 22): localStorage key pl-best-v1 holding
+// {best_distance, best_mode, best_date}, same discipline as pl-ship (every access guarded; a
+// missing, unreadable or malformed value reads as no best). A record is strictly greater.
+export const BEST_KEY = 'pl-best-v1';
+export function parseBest(text) {
+  if (typeof text !== 'string') return null;
+  let v;
+  try { v = JSON.parse(text); } catch { return null; }
+  if (!v || typeof v !== 'object' || !Number.isSafeInteger(v.best_distance) || v.best_distance < 0) return null;
+  return {best_distance: v.best_distance, best_mode: typeof v.best_mode === 'string' ? v.best_mode : null,
+    best_date: typeof v.best_date === 'string' ? v.best_date : null};
+}
+export function readBest(storage) {
+  try { return parseBest(storage?.getItem?.(BEST_KEY) ?? null); } catch { return null; }
+}
+export function isNewRecord(distance, best) {
+  return Number.isSafeInteger(distance) && distance > (best ? best.best_distance : 0);
+}
+// Write the result as the new best; false when storage is missing or refuses the write.
+export function writeBest(storage, d) {
+  try {
+    if (typeof storage?.setItem !== 'function') return false;
+    storage.setItem(BEST_KEY, JSON.stringify({best_distance: d.distance, best_mode: d.mode, best_date: d.date}));
+    return true;
+  } catch { return false; }
+}
+const groupDigits = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 
 // mm:ss from ticks. `tps` is the sim TICKS_PER_SECOND, handed in by the client loop.
 export function formatTime(ticks, tps) {
@@ -33,17 +89,32 @@ export function flavorText(reason, loops) {
   if (reason === 'collision') return `An asteroid found your hull in loop ${loops}. The tunnel keeps the score.`;
   return 'You pulled out of the tunnel early. The lanes will wait.';
 }
+// pl-v3 flavor line: the distance is the score (spec 21.6).
+export function flavorTextV3(d) {
+  const km = formatKm(d.distance);
+  if (d.record) return `New record: ${km} KM. The tunnel remembers this one.`;
+  if (d.reason === 'complete') return `${MODE_LABELS[d.mode] ?? 'Timed'} run complete at ${km} KM. The pulse bows to you.`;
+  if (d.reason === 'collision') return `An asteroid found your hull at ${km} KM. The tunnel keeps the distance.`;
+  return 'You pulled out of the tunnel early. The lanes will wait.';
+}
+const flavorFor = d => (isV3(d) ? flavorTextV3(d) : flavorText(d.reason, d.loops));
 
 // Plain-number summary from the client loop: {score, ticks, tps, loops, loopCount, lanes, lane,
-// weapon, seed, ruleset, reason, date, maxTicks, ship, settings}. Anything malformed falls back
-// to a safe value; an unknown or missing ship id becomes SHIP_DEFAULT (ships.js).
+// weapon, seed, ruleset, reason, date, maxTicks, ship, settings}, plus for pl-v3 runs (spec 22)
+// {distance, mode, destroyed, dodged, minerals, gems, boosts} and the record flag. Anything
+// malformed falls back to a safe value; an unknown or missing ship id becomes SHIP_DEFAULT
+// (ships.js).
 // FB3-QR R-3: `settings` ({music_level, mute, quality, reduced_motion}, the lobby settings the run
 // was played with) plus the raw seed give the challenge code. Missing or invalid data gives
 // challenge null (the card is drawn without a QR); it never throws.
+// Idempotent: normalizeResult(normalizeResult(r)) equals normalizeResult(r) field for field (the
+// app normalizes in show() and again in renderCard), so every input the challenge needs is
+// carried through on the normalized object.
 export function normalizeResult(r = {}) {
   r = r && typeof r === 'object' ? r : {};
   const int = (v, d = 0) => (Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : d);
   const str = (v, d) => (typeof v === 'string' && v ? v : d);
+  const mu = (v, d) => (Number.isSafeInteger(v) && v >= 0 ? v : d);
   const d = {
     score: int(r.score), ticks: int(r.ticks, int(r.score)), tps: int(r.tps, 60) || 60,
     loops: int(r.loops, 1) || 1, loopCount: int(r.loopCount, 3) || 3,
@@ -57,23 +128,38 @@ export function normalizeResult(r = {}) {
       ? {music_level: r.settings.music_level, mute: r.settings.mute, quality: r.settings.quality,
         reduced_motion: r.settings.reduced_motion} : null,
   };
+  const v3 = isV3(d);
+  // pl-v3 (spec 22): distance in raw mu (summary distance, else dist, else score), the session
+  // mode, the secondary stat row and the record flag. null / 0 / false for pl-v2 runs.
+  d.distance = v3 ? mu(r.distance, mu(r.dist, mu(r.score, 0))) : null;
+  d.mode = v3 && MODES.includes(r.mode) ? r.mode : null;
+  for (const k of ['destroyed', 'dodged', 'minerals', 'gems', 'boosts']) d[k] = int(r[k], 0);
+  d.record = v3 && r.record === true;
   d.challenge = challengeFor(r, d);
   return d;
 }
 
 // The PLR1 code of this run (challenge.js), or null when any needed value is missing/invalid.
+// pl-v3 runs always carry a v: 2 payload with mode and dist (R35.6, reference NOTE 13: exactly the
+// section 20 settings plus mode, dist and score = dist); pl-v2 runs keep the v: 1 payload.
 export function challengeFor(r, d) {
   try {
-    const s = r.settings;
-    if (!s || typeof s !== 'object' || !Number.isInteger(r.seed) || !Number.isInteger(r.score)) return null;
-    return encodeChallenge({seed: r.seed, ship: d.ship, ruleset: d.ruleset, music_level: s.music_level, mute: s.mute,
-      quality: s.quality, reduced_motion: s.reduced_motion, score: d.score, loops: d.loops, time: formatTime(d.ticks, d.tps)});
+    const s = d.settings;
+    if (!s || !Number.isInteger(r.seed)) return null;
+    const preset = {seed: r.seed, ship: d.ship, music_level: s.music_level, mute: s.mute, quality: s.quality,
+      reduced_motion: s.reduced_motion};
+    if (isV3(d)) {
+      if (!d.mode || d.distance === null) return null;
+      return encodeChallenge({...preset, v: 2, ruleset: RULESET_V3, mode: d.mode, dist: d.distance, score: d.distance});
+    }
+    if (!Number.isInteger(r.score)) return null;
+    return encodeChallenge({...preset, ruleset: d.ruleset, score: d.score, loops: d.loops, time: formatTime(d.ticks, d.tps)});
   } catch { return null; }
 }
 
 // ------------------------------------------------------------------ achievement card (GO-2)
 // 1080x1350 (4:5). renderCard(ctx, data) is pure: it only issues CanvasRenderingContext2D calls on
-// the ctx it is given. No I/O, no fetched assets, no clock, no Math.random (the art is seeded by
+// the ctx it is given. No I/O, no remote assets, no clock, no Math.random (the art is seeded by
 // the run seed, so the same run always draws the same card).
 export const CARD_W = 1080, CARD_H = 1350;
 const ART = Object.freeze({x: 66, y: 206, w: 948, h: 640});
@@ -88,6 +174,8 @@ const TIER_STYLE = {
     duo: ['#141b2e', '#eef4ff']},
   GOLD: {foil: ['#5e3f08', '#e0a82e', '#fff1b8', '#a8761a', '#ffd76a', '#4d3306'], ink: '#ffe28a', glow: [242, 193, 78],
     duo: ['#2b1a02', '#ffe9a8']},
+  PLATINUM: {foil: ['#26323d', '#9fbccd', '#f4fbff', '#6f8ea3', '#dff2ff', '#1f2a33'], ink: '#e8f9ff', glow: [160, 225, 255],
+    duo: ['#0c1a26', '#e6fbff']},
   MYTHIC: {foil: ['#ff5bd6', '#7c9bff', '#69e2d3', '#fff1b8', '#ff5bd6', '#7c9bff'], ink: '#ffffff', glow: [255, 91, 214],
     duo: ['#3c0b52', '#9ff6ff']},
 };
@@ -165,7 +253,7 @@ function drawHeader(ctx, style) {
 }
 
 function drawBadge(ctx, tier, style) {
-  const cx = 942, cy = 118, r = 80;
+  const {cx, cy} = BADGE, r = 80;
   ctx.save();
   ctx.shadowColor = rgba(style.glow, 0.8); ctx.shadowBlur = 30;
   ctx.beginPath();
@@ -182,7 +270,37 @@ function drawBadge(ctx, tier, style) {
   ctx.fillStyle = core; ctx.fill();
   ctx.lineWidth = 3; ctx.strokeStyle = style.ink; ctx.stroke();
   text(ctx, 'TIER', cx, cy - 18, {font: `700 18px ${MONO}`, color: rgba(style.glow, 1), align: 'center'});
-  text(ctx, tier.name, cx, cy + 22, {font: `italic 900 34px ${FONT}`, color: style.ink, align: 'center', max: 108});
+  text(ctx, tier.name, cx, cy + 22, {font: `italic 900 ${tier.name.length > 6 ? 26 : 34}px ${FONT}`, color: style.ink, align: 'center', max: 108});
+}
+
+// Mythic treatment (spec 22: unique foil/halo plus a NEW RECORD badge), record cards only. The
+// halo is a prismatic burst behind the tier badge; the ribbon sits on the top right of the art.
+const BADGE = Object.freeze({cx: 942, cy: 118});
+function drawMythicHalo(ctx, style) {
+  const {cx, cy} = BADGE;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const halo = ctx.createRadialGradient(cx, cy, 60, cx, cy, 170);
+  halo.addColorStop(0, rgba(style.glow, 0.55)); halo.addColorStop(0.5, 'rgba(124,155,255,0.22)'); halo.addColorStop(1, 'rgba(105,226,211,0)');
+  ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(cx, cy, 170, 0, Math.PI * 2); ctx.fill();
+  for (let i = 0; i < 24; i++) { // prismatic rays
+    const a = i * Math.PI / 12, r0 = 92, r1 = i % 2 ? 128 : 156;
+    ctx.beginPath(); ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0); ctx.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+    ctx.lineWidth = i % 2 ? 2 : 3; ctx.strokeStyle = foil(ctx, style, cx - r1, cy - r1, cx + r1, cy + r1); ctx.stroke();
+  }
+  ctx.restore();
+}
+export const RECORD_RIBBON = Object.freeze({x: 790, y: 222, w: 208, h: 46});
+function drawRecordRibbon(ctx, style) {
+  const {x, y, w, h} = RECORD_RIBBON;
+  ctx.save();
+  ctx.shadowColor = rgba(style.glow, 0.9); ctx.shadowBlur = 24;
+  roundRect(ctx, x, y, w, h, h / 2);
+  ctx.fillStyle = foil(ctx, style, x, y, x + w, y + h); ctx.fill();
+  ctx.restore();
+  roundRect(ctx, x, y, w, h, h / 2);
+  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.stroke();
+  text(ctx, 'NEW RECORD', x + w / 2, y + 32, {font: `italic 900 26px ${FONT}`, color: '#120424', align: 'center', max: w - 24});
 }
 
 // Seeded starfield: a few hundred arcs of varied size, tint and brightness, plus flares.
@@ -449,22 +567,62 @@ function drawStats(ctx, d, style) {
   }
 }
 
-// Footer without a challenge QR (the GO-2 layout, unchanged).
+// pl-v3 stats (spec 22): the DISTANCE headline in KM with the mode, TIME and LOOPS cells, then the
+// secondary stat row (destroyed, dodged, minerals, gems, boosts used). Same band as drawStats.
+export const STATS_V3 = Object.freeze({top: 862, h: 124, rowTop: 996, rowH: 58});
+function drawStatsV3(ctx, d, style) {
+  const {top, h, rowTop, rowH} = STATS_V3;
+  panel(ctx, 66, top, 486, h, style);
+  text(ctx, 'DISTANCE', 92, top + 36, {font: `700 24px ${MONO}`, color: rgba(style.glow, 1)});
+  text(ctx, MODE_LABELS[d.mode] ?? '', 528, top + 36, {font: `700 24px ${MONO}`, color: '#8e9ab9', align: 'right'});
+  const big = ctx.createLinearGradient(0, top + 44, 0, top + 116);
+  big.addColorStop(0, '#ffffff'); big.addColorStop(1, style.ink);
+  ctx.save();
+  ctx.shadowColor = rgba(style.glow, 0.75); ctx.shadowBlur = 24;
+  text(ctx, `${formatKm(d.distance)} KM`, 88, top + 108, {font: `italic 900 76px ${FONT}`, color: big, max: 440});
+  ctx.restore();
+  for (const [label, value, cx] of [['TIME', formatTime(d.ticks, d.tps), 572], ['LOOPS', String(d.loops), 798]]) {
+    panel(ctx, cx, top, 216, h, style);
+    text(ctx, label, cx + 108, top + 36, {font: `700 24px ${MONO}`, color: rgba(style.glow, 1), align: 'center'});
+    text(ctx, value, cx + 108, top + 100, {font: `800 50px ${MONO}`, color: '#eef1ff', align: 'center', max: 196});
+  }
+  const row = [['DESTROYED', d.destroyed], ['DODGED', d.dodged], ['MINERALS', d.minerals], ['GEMS', d.gems], ['BOOSTS', d.boosts]];
+  const gap = 10, w = (ART.w - gap * (row.length - 1)) / row.length;
+  row.forEach(([label, value], i) => {
+    const x = ART.x + i * (w + gap);
+    panel(ctx, x, rowTop, w, rowH, style);
+    text(ctx, label, x + w / 2, rowTop + 22, {font: `700 15px ${MONO}`, color: rgba(style.glow, 1), align: 'center', max: w - 16});
+    text(ctx, groupDigits(value), x + w / 2, rowTop + 50, {font: `800 26px ${MONO}`, color: '#eef1ff', align: 'center', max: w - 16});
+  });
+}
+
+// The tier row stated on the card: thresholds ascending, the label of each, the lit band and the
+// caption. pl-v3 lights the KM band (a record card shows MYTHIC on the badge and ribbon).
+function tierRow(d, tier) {
+  if (isV3(d)) {
+    return {tiers: [...KM_TIERS].reverse(), label: t => `${t.name} ${groupDigits(t.min)}+`,
+      lit: kmTierFor(kmOf(d.distance)).name, caption: 'TIERS BY DISTANCE (KM)  ·  MYTHIC = NEW RECORD'};
+  }
+  return {tiers: [...TIERS].reverse(), label: t => (t.min >= d.maxTicks ? `${t.name} ${t.min}` : `${t.name} ${t.min}+`),
+    lit: tier.name, caption: 'TIERS BY SCORE (SURVIVED TICKS)'};
+}
+const rulesetLine = d => (isV3(d) && d.mode ? `${d.ruleset} ${MODE_LABELS[d.mode] ?? d.mode}` : d.ruleset);
+
+// Footer without a challenge QR (the GO-2 layout, unchanged for pl-v2).
 function drawFooter(ctx, d, tier, style) {
-  text(ctx, `“${flavorText(d.reason, d.loops)}”`, CARD_W / 2, 1110, {font: `italic 500 32px ${FONT}`, color: '#cfd6f2', align: 'center', max: 940});
+  text(ctx, `“${flavorFor(d)}”`, CARD_W / 2, 1110, {font: `italic 500 32px ${FONT}`, color: '#cfd6f2', align: 'center', max: 940});
   const rule = ctx.createLinearGradient(80, 0, CARD_W - 80, 0);
   rule.addColorStop(0, rgba(style.glow, 0)); rule.addColorStop(0.5, rgba(style.glow, 0.9)); rule.addColorStop(1, rgba(style.glow, 0));
   ctx.fillStyle = rule; ctx.fillRect(80, 1138, CARD_W - 160, 2);
-  text(ctx, `SEED ${d.seed}   ·   ${d.ruleset}   ·   ${d.date} UTC`, CARD_W / 2, 1192, {font: `700 30px ${MONO}`, color: '#69e2d3', align: 'center', max: 940});
+  text(ctx, `SEED ${d.seed}   ·   ${rulesetLine(d)}   ·   ${d.date} UTC`, CARD_W / 2, 1192, {font: `700 30px ${MONO}`, color: '#69e2d3', align: 'center', max: 940});
   // Tier thresholds stated on the card; the earned tier is lit.
-  const order = [...TIERS].reverse();
-  order.forEach((t, i) => {
-    const cx = 168 + i * 248, lit = t.name === tier.name;
-    const label = t.min >= d.maxTicks ? `${t.name} ${t.min}` : `${t.name} ${t.min}+`;
-    text(ctx, label, cx, 1246, {font: `${lit ? 800 : 600} 24px ${MONO}`, color: lit ? style.ink : '#6f7899', align: 'center', max: 236});
+  const row = tierRow(d, tier);
+  row.tiers.forEach((t, i) => {
+    const cx = 168 + i * 248, lit = t.name === row.lit;
+    text(ctx, row.label(t), cx, 1246, {font: `${lit ? 800 : 600} 24px ${MONO}`, color: lit ? style.ink : '#6f7899', align: 'center', max: 236});
     if (lit) { ctx.fillStyle = style.ink; ctx.fillRect(cx - 60, 1258, 120, 3); }
   });
-  text(ctx, `TIERS BY SCORE (SURVIVED TICKS)`, CARD_W / 2, 1296, {font: `600 18px ${MONO}`, color: '#59617f', align: 'center'});
+  text(ctx, row.caption, CARD_W / 2, 1296, {font: `600 18px ${MONO}`, color: '#59617f', align: 'center', max: 640});
   text(ctx, `No.${d.seed.toString(16).padStart(8, '0').toUpperCase()}`, 70, 1296, {font: `600 18px ${MONO}`, color: '#59617f'});
 }
 
@@ -506,20 +664,22 @@ function drawChallengeFooter(ctx, d, tier, style) {
   ctx.shadowColor = rgba(style.glow, 0.7); ctx.shadowBlur = 18;
   text(ctx, 'SCAN TO CHALLENGE', left, 1108, {font: `italic 900 46px ${FONT}`, color: ink, max: width});
   ctx.restore();
-  text(ctx, `BEAT ${d.score}   ·   SEED ${d.seed}`, left, 1150, {font: `700 28px ${MONO}`, color: rgba(style.glow, 1), max: width});
-  text(ctx, `“${flavorText(d.reason, d.loops)}”`, left, 1194, {font: `italic 500 23px ${FONT}`, color: '#cfd6f2', max: width});
+  const beat = isV3(d) ? `BEAT ${formatKm(d.distance)} KM   ·   ${MODE_LABELS[d.mode] ?? d.mode}   ·   SEED ${d.seed}`
+    : `BEAT ${d.score}   ·   SEED ${d.seed}`;
+  text(ctx, beat, left, 1150, {font: `700 28px ${MONO}`, color: rgba(style.glow, 1), max: width});
+  text(ctx, `“${flavorFor(d)}”`, left, 1194, {font: `italic 500 23px ${FONT}`, color: '#cfd6f2', max: width});
   const rule = ctx.createLinearGradient(left, 0, left + width, 0);
   rule.addColorStop(0, rgba(style.glow, 0.9)); rule.addColorStop(1, rgba(style.glow, 0));
   ctx.fillStyle = rule; ctx.fillRect(left, 1214, width, 2);
-  text(ctx, `${d.ruleset}   ·   ${d.date} UTC   ·   No.${d.seed.toString(16).padStart(8, '0').toUpperCase()}`, left, 1250,
+  text(ctx, `${rulesetLine(d)}   ·   ${d.date} UTC   ·   No.${d.seed.toString(16).padStart(8, '0').toUpperCase()}`, left, 1250,
     {font: `700 24px ${MONO}`, color: '#69e2d3', max: width});
-  [...TIERS].reverse().forEach((t, i) => {
-    const x = left + i * 168, lit = t.name === tier.name;
-    const label = t.min >= d.maxTicks ? `${t.name} ${t.min}` : `${t.name} ${t.min}+`;
-    text(ctx, label, x, 1284, {font: `${lit ? 800 : 600} 20px ${MONO}`, color: lit ? style.ink : '#6f7899', max: 160});
+  const row = tierRow(d, tier);
+  row.tiers.forEach((t, i) => {
+    const x = left + i * 168, lit = t.name === row.lit;
+    text(ctx, row.label(t), x, 1284, {font: `${lit ? 800 : 600} 20px ${MONO}`, color: lit ? style.ink : '#6f7899', max: 160});
     if (lit) { ctx.fillStyle = style.ink; ctx.fillRect(x, 1293, 100, 3); }
   });
-  text(ctx, 'TIERS BY SCORE (SURVIVED TICKS)', left, 1312, {font: `600 15px ${MONO}`, color: '#59617f', max: width});
+  text(ctx, row.caption, left, 1312, {font: `600 15px ${MONO}`, color: '#59617f', max: width});
 }
 
 function cardQr(d) {
@@ -530,21 +690,26 @@ function cardQr(d) {
   } catch { return null; }
 }
 
+// Pure: ctx calls only. The record flag is data (decided by the controller from the best store
+// before the card is drawn), so a redraw of the same result (selfie retake) draws the same tier.
 export function renderCard(ctx, data) {
   const d = normalizeResult(data);
-  const tier = tierFor(d.score), style = TIER_STYLE[tier.name], rng = seededRng(d.seed);
+  const v3 = isV3(d), tier = cardTier(d), style = TIER_STYLE[tier.name], rng = seededRng(d.seed);
+  const record = v3 && d.record;
   const qr = cardQr(d);
   ctx.save();
   ctx.clearRect(0, 0, CARD_W, CARD_H);
   drawFrame(ctx, style, rng);
   drawArt(ctx, d, style, rng);
   const portrait = d.selfie ? drawPortrait(ctx, d.selfie, style) : false;
+  if (record) { drawMythicHalo(ctx, style); drawRecordRibbon(ctx, style); }
   drawHeader(ctx, style);
   drawBadge(ctx, tier, style);
-  drawStats(ctx, d, style);
+  if (v3) drawStatsV3(ctx, d, style); else drawStats(ctx, d, style);
   if (qr) { drawQr(ctx, qr, style); drawChallengeFooter(ctx, d, tier, style); } else drawFooter(ctx, d, tier, style);
   ctx.restore();
-  return {tier: tier.name, time: formatTime(d.ticks, d.tps), portrait, ship: d.ship,
+  return {tier: tier.name, time: formatTime(d.ticks, d.tps), portrait, ship: d.ship, record,
+    km: v3 ? kmOf(d.distance) : null, band: v3 ? kmTierFor(kmOf(d.distance)).name : null,
     qr: qr ? {text: d.challenge, version: qr.version, size: qr.size, ...QR_PANEL} : null};
 }
 
@@ -559,8 +724,12 @@ const ICONS = {
     'M8.6 13.5l6.8 4', 'M15.4 6.5l-6.8 4'],
 };
 
+// localStorage itself may throw on access (storage disabled); the store then reads as absent.
+const pageStorage = () => { try { return globalThis.localStorage ?? null; } catch { return null; } };
+
+// storage: the best distance store backend (getItem / setItem), default the page localStorage.
 export function createGameOver({document: doc = globalThis.document, navigator: nav = globalThis.navigator, URL: Url = globalThis.URL,
-  onBack = () => {}} = {}) {
+  storage = pageStorage(), onBack = () => {}} = {}) {
   const svgNs = doc.querySelector?.('svg')?.namespaceURI ?? null;
   const el = (tag, cls, text) => {
     const node = doc.createElement(tag);
@@ -593,18 +762,20 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
   const eyebrow = el('p', 'go-eyebrow');
   const title = el('h2', 'go-title'); title.id = 'gameover-title';
   const scoreBox = el('div', 'go-score');
-  const scoreValue = el('b', 'go-big'), scoreOf = el('span', 'go-of');
-  scoreBox.append(el('span', 'go-k', 'Score'), scoreValue, scoreOf);
+  const scoreLabel = el('span', 'go-k', 'Score'), scoreValue = el('b', 'go-big'), scoreOf = el('span', 'go-of');
+  scoreBox.append(scoreLabel, scoreValue, scoreOf);
   const stats = el('div', 'go-stats');
   const stat = label => { const box = el('div', 'go-stat'), v = el('b'); box.append(el('span', 'go-k', label), v); stats.append(box); return v; };
   const timeValue = stat('Time'), loopsValue = stat('Loops'), tierValue = stat('Tier');
   const flavor = el('p', 'go-flavor');
   const dataLine = el('p', 'go-data');
+  const statLine = el('p', 'go-data go-statline'); // pl-v3 secondary stat row (spec 22)
+  statLine.hidden = true;
   const actions = el('div', 'go-actions');
   const makeCardButton = button('go-make primary', 'card', 'Make card');
   const backButton = button('go-back', 'lobby', 'Back to lobby');
   actions.append(makeCardButton, backButton);
-  summary.append(eyebrow, title, scoreBox, stats, flavor, dataLine, actions);
+  summary.append(eyebrow, title, scoreBox, stats, flavor, dataLine, statLine, actions);
 
   // Card view (GO-2..GO-4).
   const cardView = el('section', 'go-cardview');
@@ -626,6 +797,10 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
   doc.body.append(dialog);
 
   let result = null;
+  // Best store (R35.7): show() reads the standing best and decides the record flag once per
+  // result; the first card drawn for a record result then commits it as the new best. Redraws
+  // keep the flag, so the record card stays mythic after the store has moved.
+  let bestCommitted = false;
   // Selfie (GO-3): an in-memory image only. It is never uploaded, written to storage or sent
   // anywhere; it lives until the page is closed or another photo replaces it.
   let selfie = null, selfieUrl = null, pendingInput = null;
@@ -639,7 +814,9 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
     const ctx = canvas.getContext('2d');
     if (!ctx) { setHint('This browser cannot draw the card.'); return null; }
     card = renderCard(ctx, {...result, selfie});
-    canvas.setAttribute('aria-label', `Achievement card: ${card.tier}, score ${result.score}, time ${card.time}, seed ${result.seed}${card.qr ? ', with challenge QR' : ''}`);
+    if (card.record && !bestCommitted) { bestCommitted = true; writeBest(storage, result); } // after the card, never during it
+    const headline = isV3(result) ? `${card.record ? 'new record, ' : ''}distance ${formatKm(result.distance)} KM` : `score ${result.score}`;
+    canvas.setAttribute('aria-label', `Achievement card: ${card.tier}, ${headline}, time ${card.time}, seed ${result.seed}${card.qr ? ', with challenge QR' : ''}`);
     blobPromise = null;
     pngBlob(); // encode now so Share can call navigator.share while the tap still counts as a gesture
     return card;
@@ -693,8 +870,9 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
     sharing = true;
     try {
       if (!nav.canShare({files: [file]})) return setHint(NO_SHARE);
+      const headline = isV3(result) ? `${formatKm(result.distance)} KM (${MODE_LABELS[result.mode] ?? result.mode})` : `score ${result.score}`;
       await nav.share({files: [file], title: 'Pulse Lanes',
-        text: `${card?.tier ?? tierFor(result.score).name} run in Pulse Lanes: score ${result.score}, time ${formatTime(result.ticks, result.tps)}, seed ${result.seed}.`});
+        text: `${card?.tier ?? cardTier(result).name} run in Pulse Lanes: ${headline}, time ${formatTime(result.ticks, result.tps)}, seed ${result.seed}.`});
       setHint(restingHint());
     } catch (err) {
       if (err?.name !== 'AbortError') setHint('Share did not finish. Use Save image instead.');
@@ -756,18 +934,26 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
 
   function show(raw) {
     result = normalizeResult(raw);
-    const tier = tierFor(result.score);
+    const v3 = isV3(result);
+    // pl-v3: record iff the distance strictly beats the best stored before this run's card.
+    if (v3) result.record = isNewRecord(result.distance, readBest(storage));
+    bestCommitted = false;
+    const tier = cardTier(result);
     const [kicker, headline] = HEADLINES[result.reason] ?? HEADLINES.collision;
-    eyebrow.textContent = kicker;
+    eyebrow.textContent = v3 && result.record ? 'New record' : kicker;
     title.textContent = headline;
-    scoreValue.textContent = String(result.score);
-    scoreOf.textContent = `/ ${result.maxTicks}`;
+    scoreLabel.textContent = v3 ? 'Distance' : 'Score';
+    scoreValue.textContent = v3 ? `${formatKm(result.distance)} KM` : String(result.score);
+    scoreOf.textContent = v3 ? (MODE_LABELS[result.mode] ?? '') : `/ ${result.maxTicks}`;
     timeValue.textContent = formatTime(result.ticks, result.tps);
-    loopsValue.textContent = `${result.loops} / ${result.loopCount}`;
+    loopsValue.textContent = v3 ? String(result.loops) : `${result.loops} / ${result.loopCount}`;
     tierValue.textContent = tier.name;
     dialog.dataset.tier = tier.name.toLowerCase();
-    flavor.textContent = flavorText(result.reason, result.loops);
-    dataLine.textContent = `${result.ruleset} · seed ${result.seed}`;
+    flavor.textContent = flavorFor(result);
+    dataLine.textContent = v3 && result.mode ? `${result.ruleset} · ${MODE_LABELS[result.mode]} · seed ${result.seed}`
+      : `${result.ruleset} · seed ${result.seed}`;
+    statLine.hidden = !v3;
+    statLine.textContent = v3 ? `Destroyed ${result.destroyed} · Dodged ${result.dodged} · Minerals ${result.minerals} · Gems ${result.gems} · Boosts ${result.boosts}` : '';
     summary.hidden = false; cardView.hidden = true;
     closedByUs = false;
     if (!dialog.open) { try { dialog.showModal(); } catch { dialog.setAttribute('open', ''); } }

@@ -1,13 +1,16 @@
-// Client loop (pl-v2). The only module that calls step/abandon on the game. Renderers, HUD,
+// Client loop. The only module that calls step/abandon on the game. Renderers, HUD,
 // lobby and audio receive read-only rows (map, course, state snapshots, view) from here.
+// New runs play pl-v3 (spec 21, ruling R35) in the lobby mode; the pl-v2 module stays for the
+// lobby backdrop, the shared tunnel geometry and a legacy (v1 challenge) pl-v2 run path.
 import {createGame, TICKS_PER_SECOND, MAX_TICKS, WEAPONS} from '../src/sim/space_racer.js';
+import {createGame as createGameV3, loopCourse, loopStart, MODES, MODE_TICKS, WEAPONS as WEAPONS_V3} from '../src/sim/space_racer_v3.js';
 import {newSave, importSave, exportSave, STORAGE_KEY} from '../src/state/pilot_state.js';
 import {quantizeStick, keyboardStick, MAX_RADIUS_PX, CAPTURE_RADIUS_PX} from '../src/input/controls.js';
 import {digest} from './digest.js';
 import {Music} from './music.js';
 import {ScoreVoice} from './score_voice.js';
 import {Sfx} from './sfx.js';
-import {renderHud} from './hud.js';
+import {renderHud, buildControls, formatKm, MODE_LABELS} from './hud.js';
 import {createPause} from './pause.js';
 import {applySetting, defaultSettings, lastResultText, retryEnabled, SETTING_CONTROLS} from './lobby_model.js';
 import {createRenderer} from './render.js';
@@ -35,7 +38,14 @@ const sfx = new Sfx(music);
 let save = null, session = null, game = null, map = null, course = [], view = EMPTY_VIEW;
 let prevState = null, currState = null, hudState = null, lastRun = null, lastSeed = null, seed = randomSeed();
 let running = false, recorded = false, accumulator = 0, previousFrame = null, lastActive = Date.now();
-let hops = [], fires = 0, lastSent = [0, 0];
+let hops = [], fires = 0, boosts = 0, lastSent = [0, 0];
+// pl-v3 run plumbing (spec 21). runRuleset picks the button range: bit3 boost exists only for
+// pl-v3 (buttons 0..15); a pl-v2 run keeps 0..7. scoreMap is the base pl-map-1 (HUD tempo, score
+// voice); `map` is what the renderer draws, for pl-v3 the base loops repeated per cycle (R35.4,
+// same section 4.3 geometry). `course` grows by absolute loop as a pl-v3 run advances.
+const V3_CYCLE_TICKS = loopStart(3);
+const V3_TRACK_CYCLES = 12;
+let runRuleset = 'pl-v3', runMode = 'death', scoreMap = null, courseLoops = 0, runBoosts = 0;
 // Per-tick {p, state, view} rows already produced by step/view, newest last (presentation only).
 // A frame that runs several ticks hands all of them to the renderer, so no fire or short-lived
 // rocket row is lost between frames.
@@ -99,6 +109,16 @@ function beginSession() {
 function recordRun() {
   if (!game || recorded || !session) return;
   if (game.state().status === 'running') game.abandon();
+  if (runRuleset === 'pl-v3') {
+    // PilotState v2 (src/state/pilot_state.js, frozen) admits pl-v1/pl-v2 run records only and
+    // the pl-v3 game has no run record or replay bytes, so a pl-v3 run is not written into the
+    // save (that would make the next boot refuse the whole save). Session ticks still count.
+    const s = game.state();
+    recorded = true; currState = s;
+    lastRun = {ruleset_id: s.ruleset_id, mode: s.mode, seed: s.seed, terminal_reason: s.terminal_reason, distance: s.distance};
+    persist();
+    return;
+  }
   const runNumber = save.runs.length ? BigInt(save.runs.at(-1).run_id.slice(4)) + 1n : 1n;
   if (runNumber > 9999999999999999n) {
     notice('Run ID limit reached. Export this save and start an empty save.');
@@ -113,7 +133,7 @@ function recordRun() {
 
 function stopRun() {
   recordRun();
-  running = false; hops = []; fires = 0; accumulator = 0; previousFrame = null;
+  running = false; hops = []; fires = 0; boosts = 0; accumulator = 0; previousFrame = null;
   pause.runEnded();
   music.quiet();
 }
@@ -126,10 +146,12 @@ function endSession() {
 // ------------------------------------------------------------------ lobby (spec 14)
 const lobby = $('lobby');
 function updateLobby() {
-  $('last-result').textContent = lastResultText(lastRun);
+  $('last-result').textContent = lastRun?.ruleset_id === 'pl-v3'
+    ? `${{collision: 'Collision', complete: 'Complete', abandoned: 'Abandoned'}[lastRun.terminal_reason] ?? 'Unknown'} · ${formatKm(lastRun.distance)} KM · ${MODE_LABELS[lastRun.mode] ?? lastRun.mode} · seed ${lastRun.seed}`
+    : lastResultText(lastRun);
   $('seed').textContent = String(lastSeed ?? seed);
   $('retry').disabled = !retryEnabled({lastSeed});
-  $('replay').disabled = !(game && game.state().status === 'ended' && recorded);
+  $('replay').disabled = !(game && typeof game.replayBytes === 'function' && game.state().status === 'ended' && recorded);
   showRendererKind();
   const s = settingsNow();
   $('set-music-level').value = String(s.music_level);
@@ -200,6 +222,57 @@ function buildShipPicker() {
   showShip();
 }
 
+// Mode selector (spec 21.6, ruling R35): DEATH (default), 90S, 120S as lobby-token buttons like
+// the ship picker. The choice lives in its own localStorage key pl-mode (same discipline as
+// pl-ship), never in the pilot save; the next pl-v3 run is created with it.
+const MODE_KEY = 'pl-mode';
+const MODE_DEFAULT = 'death';
+const MODE_BLURB = Object.freeze({death: 'Until hit', timed90: '90 seconds', timed120: '120 seconds'});
+const modeOrDefault = m => (MODES.includes(m) ? m : MODE_DEFAULT);
+let modeId = MODE_DEFAULT;
+const modeButtons = [];
+function loadMode() {
+  try { return modeOrDefault(localStorage.getItem(MODE_KEY)); } catch { return MODE_DEFAULT; }
+}
+function showMode() { for (const b of modeButtons) b.setAttribute('aria-pressed', String(b.dataset.mode === modeId)); }
+function chooseMode(m) {
+  modeId = modeOrDefault(m);
+  try { localStorage.setItem(MODE_KEY, modeId); } catch { /* the choice still applies until the page closes */ }
+  showMode();
+}
+function buildModePicker() {
+  const section = document.createElement('section');
+  section.className = 'modes';
+  section.setAttribute('aria-label', 'Mode');
+  for (const m of MODES) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mode';
+    b.dataset.mode = m;
+    b.setAttribute('aria-label', `${MODE_LABELS[m]}: ${MODE_BLURB[m]}`);
+    const name = document.createElement('span');
+    name.className = 'mode-name';
+    name.textContent = MODE_LABELS[m];
+    const blurb = document.createElement('span');
+    blurb.className = 'mode-blurb';
+    blurb.textContent = MODE_BLURB[m];
+    b.append(name, blurb);
+    b.addEventListener('click', () => chooseMode(m));
+    modeButtons.push(b);
+    section.append(b);
+  }
+  (lobby.querySelector('.ships') ?? lobby.querySelector('.launch')).after(section);
+  // Key legend: the boost key next to the existing chips (index.html stays unchanged).
+  const keys = lobby.querySelector('.keys');
+  if (keys) {
+    const chip = document.createElement('span'), kbd = document.createElement('kbd');
+    kbd.textContent = 'B';
+    chip.append(kbd, 'Boost');
+    keys.append(chip);
+  }
+  showMode();
+}
+
 // Challenge scan (spec 20 QR-3/QR-4, ruling R33). The Scan button, the banner and the scan
 // overlay are built here and in challenge.js, never in index.html. A decoded code presets the
 // lobby through the same paths as manual configuration: changeSetting (persist + music and
@@ -216,10 +289,18 @@ const lobbyPort = {
   chooseShip: id => chooseShip(id),
   setSeed: next => { seed = next >>> 0; updateLobby(); },
   setChallenge: c => { challenge = c; showChallenge(); },
+  // pl-v3 hooks for the challenge apply path (R35.6): setMode presets the lobby mode exactly like a
+  // mode button; a challenge object carrying ruleset 'pl-v2' (decoded legacy v1 payload) makes the
+  // next run on its seed a pl-v2 timed run.
+  setMode: m => chooseMode(m),
+  // Spec 22 scan apply ('jump immediately'): start the preset seed now, exactly as Play would.
+  play: () => { if (save) { const next = seed; seed = randomSeed(); start(next); } },
 };
 function onChallenge(config, result) {
   if (!save) notice('Import a valid save or choose New empty save before playing the challenge.');
   applyChallenge(config, lobbyPort);
+  if (running) return; // the challenge run started directly
+  challengeBanner?.scrollIntoView?.({block: 'nearest'}); // paste sheet success lands on the banner
   notice(result.warnings.length ? `Challenge loaded. ${config.ship_requested} is not in this build; flying ${config.ship.toUpperCase()}.`
     : 'Challenge loaded. Press Play to fly it.');
   $('play').focus?.();
@@ -287,12 +368,22 @@ function start(nextSeed) {
   // A challenge banner stays while its seed is played (Play, then Retry); any other seed ends it.
   if (challenge && nextSeed !== challenge.seed) { challenge = null; showChallenge(); }
   lastSeed = nextSeed;
-  game = createGame(nextSeed); map = game.map(); course = game.course();
+  runRuleset = challenge?.ruleset === 'pl-v2' && challenge.seed === nextSeed ? 'pl-v2' : 'pl-v3';
+  if (runRuleset === 'pl-v3') {
+    runMode = modeId;
+    game = createGameV3(nextSeed, runMode);
+    scoreMap = createGame(nextSeed).map();
+    map = {...scoreMap, loops: Array.from({length: V3_TRACK_CYCLES}, () => scoreMap.loops).flat()};
+    course = []; courseLoops = 0; ensureCourse(0);
+  } else {
+    runMode = null;
+    game = createGame(nextSeed); map = scoreMap = game.map(); course = game.course();
+  }
   prevState = currState = game.state(); view = game.view();
   trail = [{p: currState.processed, state: currState, view}];
-  recorded = false; running = true; hops = []; fires = 0; lastSent = [0, 0];
+  recorded = false; running = true; hops = []; fires = 0; boosts = 0; runBoosts = 0; lastSent = [0, 0];
   accumulator = 0; previousFrame = null;
-  music.reset(); voice.setMap(map);
+  music.reset(); voice.setMap(scoreMap);
   beginSession(); music.gesture(); persist();
   renderer.setCourse(map, course);
   runShip = shipId; renderer.setShip?.(runShip);
@@ -302,11 +393,34 @@ function start(nextSeed) {
   closeLobby();
 }
 
+// pl-v3 course rows by asteroid id (the renderer indexes course[id]); view() reads loops L and L + 1,
+// so rows are kept one loop ahead of the state's loop. Same array object for the whole run.
+function ensureCourse(L) {
+  while (courseLoops <= L + 1) {
+    for (const row of loopCourse(lastSeed, courseLoops)) course[row[0]] = row;
+    courseLoops++;
+  }
+}
+
 function finishRun() {
   stopRun();
   const s = currState;
   if (!s || s.status !== 'ended' || s.terminal_reason === 'abandoned') return openLobby();
   document.body.classList.remove('running');
+  if (s.ruleset_id === 'pl-v3') {
+    // Spec 22 summary for the card (B-CARD renders it): distance plus the secondary stat row.
+    let minerals = 0, gems = 0;
+    for (const e of game.trace().events) if (e[1] === 5 && e.length === 5) { if (e[2] === 1) minerals++; else gems++; }
+    gameOver.show({
+      score: s.score, distance: s.distance, km: Math.floor(s.distance / 1000), mode: s.mode,
+      ticks: s.terminal_tick, tps: TICKS_PER_SECOND, maxTicks: MODE_TICKS[s.mode] ?? s.terminal_tick,
+      loops: s.loop + 1, loopCount: Math.max(3, s.loop + 1), lanes: s.lane_count, lane: s.lane, weapon: s.weapon,
+      destroyed: s.destroyed, dodged: s.dodged, minerals, gems, boosts: runBoosts, ammo: s.ammo,
+      seed: s.seed, ruleset: s.ruleset_id, reason: s.terminal_reason, date: now().slice(0, 10), ship: runShip,
+      settings: runSettings ?? {...settingsNow()},
+    });
+    return;
+  }
   gameOver.show({
     score: s.score, ticks: s.terminal_tick, tps: TICKS_PER_SECOND, maxTicks: MAX_TICKS,
     loops: s.loop + 1, loopCount: map?.loops?.length ?? 3, lanes: s.lane_count, lane: s.lane, weapon: s.weapon,
@@ -328,6 +442,7 @@ function press(kind) {
   if (!running || pause.isPaused() || document.hidden) return;
   const t = game.state().processed;
   if (kind === 'fire') fires++;
+  else if (kind === 'boost') { if (runRuleset === 'pl-v3') boosts++; } // bit3 exists in pl-v3 only
   else hops.push({dir: kind, tick: t});
 }
 function takeHop(t) {
@@ -344,6 +459,8 @@ function tickOnce() {
   const hop = takeHop(t);
   if (hop) buttons |= hop === 'left' ? 1 : 2;
   if (fires > 0) { fires--; buttons |= 4; }
+  // Spec 21.1: bit3 boost, an edge press like fire (one per tick, extras queue). pl-v2 stays 0..7.
+  if (boosts > 0) { boosts--; if (runRuleset === 'pl-v3') buttons |= 8; }
   const stick = currentStick();
   const entries = [];
   if (buttons || stick[0] !== lastSent[0] || stick[1] !== lastSent[1]) {
@@ -352,15 +469,22 @@ function tickOnce() {
   }
   prevState = currState;
   currState = game.step(1, entries);
+  const v3 = runRuleset === 'pl-v3';
+  if (v3) {
+    ensureCourse(currState.loop);
+    if (currState.boost_until > prevState.boost_until) runBoosts++; // boost_until moves only on a boost
+  }
   view = game.view();
   trail.push({p: currState.processed, state: currState, view});
   if (trail.length > TRAIL_TICKS) trail.shift();
   session.active_ticks += currState.processed - t;
   lastActive = Date.now();
-  music.beat(t);
-  voice.beat(t, currState.lane);
+  // pl-v3 cycles the three base loops (R35.4): music and score voice follow the tick in the cycle.
+  const beatTick = v3 ? t % V3_CYCLE_TICKS : t;
+  music.beat(beatTick);
+  voice.beat(beatTick, currState.lane);
   // W4c R-2: a fire_ready rise across tick t is the sim's [t, 3, code, shots] event (read-only rows).
-  sfx.tick(prevState, currState, WEAPONS);
+  sfx.tick(prevState, currState, v3 ? WEAPONS_V3 : WEAPONS);
   if (currState.status === 'ended') finishRun();
 }
 
@@ -380,7 +504,7 @@ function frame(timestamp) {
     if (rendererKind === 'webgl2') { console.warn('WebGL2 draw failed, switching to the 2D fallback:', err?.message ?? err); useFallback('lost'); }
   }
   // W4c R-1: HUD DOM writes only when a tick produced a new state row, not on every frame.
-  if (currState && currState !== hudState) { renderHud(document, currState, map); hudState = currState; }
+  if (currState && currState !== hudState) { renderHud(document, currState, scoreMap); hudState = currState; }
   requestAnimationFrame(frame);
 }
 
@@ -408,7 +532,9 @@ document.addEventListener('pointerdown', event => {
 });
 document.addEventListener('pointermove', event => { if (event.pointerId === stickPointer) setStickFromPointer(event); });
 for (const type of ['pointerup', 'pointercancel']) document.addEventListener(type, event => { if (event.pointerId === stickPointer) releaseStick(); });
-for (const [id, kind] of [['hop-left', 'left'], ['hop-right', 'right'], ['fire', 'fire']]) {
+// R-2 (R35.9): the round boost button (charge ring) joins the cluster; hud.js paints its state.
+buildControls(document);
+for (const [id, kind] of [['hop-left', 'left'], ['hop-right', 'right'], ['fire', 'fire'], ['boost', 'boost']]) {
   const button = $(id);
   button.addEventListener('pointerdown', event => { event.preventDefault(); press(kind); });
   button.addEventListener('click', event => { if (event.detail === 0) press(kind); }); // keyboard activation only
@@ -420,6 +546,7 @@ document.addEventListener('keydown', event => {
   if (event.repeat) return;
   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); press(event.key === 'ArrowLeft' ? 'left' : 'right'); }
   else if (event.code === 'Space') { event.preventDefault(); press('fire'); }
+  else if (event.code === 'KeyB' || event.key === 'b' || event.key === 'B') { event.preventDefault(); press('boost'); }
 });
 document.addEventListener('keyup', event => { if (STICK_KEYS[event.code]) held[STICK_KEYS[event.code]] = false; });
 window.addEventListener('blur', () => { for (const k of Object.keys(held)) held[k] = false; releaseStick(); });
@@ -446,7 +573,7 @@ $('load').onclick = () => {
   catch { notice('Local storage is unavailable. Import a save file instead.'); }
 };
 $('export').onclick = () => { if (save) download('pulse-lanes-save.json', exportSave(save)); };
-$('replay').onclick = () => { if (game?.state().status === 'ended') download(`pulse-lanes-${lastSeed}.replay`, game.replayBytes()); };
+$('replay').onclick = () => { if (typeof game?.replayBytes === 'function' && game.state().status === 'ended') download(`pulse-lanes-${lastSeed}.replay`, game.replayBytes()); };
 $('import').onchange = async event => {
   const file = event.target.files[0];
   if (file) {
@@ -486,10 +613,12 @@ try {
 } catch { save = newSave(crypto.randomUUID()); notice('Local storage unavailable. Use Export save to keep your runs.'); }
 shipId = runShip = loadShip(); // before the renderer exists, so the first frame shows the chosen ship
 buildShipPicker();
+modeId = loadMode();
+buildModePicker();
 buildChallengeUi();
 initRenderer();
 // Lobby backdrop: the course of the shown seed, cruising without asteroids (presentation only).
-map = createGame(seed).map();
+map = scoreMap = createGame(seed).map();
 renderer.setCourse(map, []);
 applySettingsToOutputs();
 openLobby();

@@ -6,29 +6,42 @@
 // lobby exactly as manual configuration would; the frozen sim plays and scores the run.
 //
 // Scanner: createScanOverlay builds the camera overlay (getUserMedia + BarcodeDetector, both
-// platform APIs) or, when either is missing or refused, a paste-code fallback. Every element is
+// platform APIs) or, when either is missing or refused, a paste-code fallback laid out as a
+// mobile bottom sheet (spec 23: data-mode="paste", styled in lobby.css). Every element is
 // created here; index.html is untouched. Camera frames go only to the platform detector inside
 // the page: this module has no network primitive of any kind.
+//
+// Codec v2 (spec 22, ruling R35.6, oracle docs/pm/runs/FB3-TA6/reference_v3.mjs NOTE 12 to 14):
+// the PLR1 prefix is kept; the payload field v selects the closed field set. v: 1 is the legacy
+// pl-v2 preset (still decoded, still applied as a pl-v2 timed run); v: 2 is a pl-v3 preset that
+// adds the session mode and the run distance dist (raw mu integer). Unknown extra fields are
+// tolerated in both versions and kept in config.extra.
 import {SHIP_IDS, SHIP_DEFAULT} from './ships.js';
+import {formatKm, MODE_LABELS} from './hud.js';
+import {MODES} from '../src/sim/space_racer_v3.js';
 import {strictJson} from '../src/shared/strict_json.js';
 
 export const PREFIX = 'PLR1:';
-export const CHALLENGE_VERSION = 1;
+export const CHALLENGE_VERSION = 1; // legacy pl-v2 payload version
+export const CHALLENGE_VERSION_V2 = 2; // pl-v3 payload version (spec 22)
+export const CHALLENGE_VERSIONS = Object.freeze([CHALLENGE_VERSION, CHALLENGE_VERSION_V2]);
 export const RULESET = 'pl-v2';
+export const RULESET_V3 = 'pl-v3';
 export const QUALITIES = Object.freeze(['high', 'low']);
 export const MUSIC_LEVEL_MIN = 0, MUSIC_LEVEL_MAX = 10; // pilot save settings domain
 export const SEED_MAX = 4294967295;
-export const SCORE_MAX = 7200; // pl-v2 MAX_TICKS: a score is survived ticks
+export const SCORE_MAX = 7200; // pl-v2 MAX_TICKS: a v1 score is survived ticks
 export const LOOPS_MAX = 99;
 export const TEXT_MAX = 2048; // longer text is never a challenge code
 const TIME_RE = /^[0-9]{2,3}:[0-5][0-9]$/;
 
-// Closed field set. Required fields must be present; optional ones may be absent.
+// Closed field sets per payload version. Required fields must be present; optional ones may be
+// absent. The section 20 fields are shared; v2 swaps the ruleset, adds mode and dist, and lifts
+// the score cap (a pl-v3 score is the distance, a safe integer >= 0).
 const isUint32 = v => Number.isInteger(v) && v >= 0 && v <= SEED_MAX;
 const isBool = v => typeof v === 'boolean';
-export const FIELDS = Object.freeze({
-  v: {required: true, ok: v => v === CHALLENGE_VERSION},
-  ruleset: {required: true, ok: v => v === RULESET},
+const isDistance = v => Number.isSafeInteger(v) && v >= 0;
+const COMMON = {
   seed: {required: true, ok: isUint32},
   ship: {required: true, ok: v => typeof v === 'string' && v.length > 0 && v.length <= 32},
   music_level: {required: true, ok: v => Number.isInteger(v) && v >= MUSIC_LEVEL_MIN && v <= MUSIC_LEVEL_MAX},
@@ -37,9 +50,26 @@ export const FIELDS = Object.freeze({
   reduced_motion: {required: true, ok: isBool},
   loops: {required: false, ok: v => Number.isInteger(v) && v >= 0 && v <= LOOPS_MAX},
   time: {required: false, ok: v => typeof v === 'string' && TIME_RE.test(v)},
+};
+export const FIELDS = Object.freeze({
+  v: {required: true, ok: v => v === CHALLENGE_VERSION},
+  ruleset: {required: true, ok: v => v === RULESET},
+  ...COMMON,
   score: {required: false, ok: v => Number.isInteger(v) && v >= 0 && v <= SCORE_MAX},
 });
+export const FIELDS_V2 = Object.freeze({
+  v: {required: true, ok: v => v === CHALLENGE_VERSION_V2},
+  ruleset: {required: true, ok: v => v === RULESET_V3},
+  ...COMMON,
+  mode: {required: true, ok: v => MODES.includes(v)},
+  dist: {required: true, ok: isDistance},
+  score: {required: false, ok: isDistance},
+});
+export const FIELDS_BY_VERSION = Object.freeze({[CHALLENGE_VERSION]: FIELDS, [CHALLENGE_VERSION_V2]: FIELDS_V2});
 export const FIELD_NAMES = Object.freeze(Object.keys(FIELDS));
+export const FIELD_NAMES_V2 = Object.freeze(Object.keys(FIELDS_V2));
+// The field set of a payload version, or null for any version this build does not know.
+const fieldsOf = v => (CHALLENGE_VERSIONS.includes(v) ? FIELDS_BY_VERSION[v] : null);
 const isPlain = o => o !== null && typeof o === 'object' && !Array.isArray(o);
 // Own data property even for a key such as "__proto__" (forward fields are arbitrary names).
 const put = (obj, k, v) => Object.defineProperty(obj, k, {value: v, enumerable: true, writable: true, configurable: true});
@@ -55,34 +85,41 @@ export function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
-// Validate one closed-set object; returns a list of error codes (empty when valid).
-function fieldErrors(obj) {
+// Validate one object against a closed field set; returns a list of error codes (empty when valid).
+function fieldErrors(obj, fields) {
   const errors = [];
-  for (const [name, f] of Object.entries(FIELDS)) {
+  for (const [name, f] of Object.entries(fields)) {
     if (!Object.hasOwn(obj, name) || obj[name] === undefined) { if (f.required) errors.push(`missing_${name}`); continue; }
     if (!f.ok(obj[name])) errors.push(`invalid_${name}`);
   }
   return errors;
 }
 
-// data: {seed, ship, music_level, mute, quality, reduced_motion, loops?, time?, score?, extra?}.
-// v and ruleset default to the current values. `extra` (plain object) carries forward fields
-// that this version does not know; they are emitted too, so a decoded code re-encodes losslessly.
+// v1 data: {seed, ship, music_level, mute, quality, reduced_motion, loops?, time?, score?, extra?}.
+// v2 data: the same plus {mode, dist} (spec 22). The version follows data.v, else the ruleset
+// ('pl-v3' gives v: 2), else v: 1; the ruleset then defaults to the one of that version. `extra`
+// (plain object) carries forward fields that the version does not know; they are emitted too, so
+// a decoded code re-encodes losslessly. Output is canonical JSON (keys sorted, no whitespace).
 // Throws RangeError on invalid data (callers that must not throw catch it).
 export function encodeChallenge(data) {
   if (!isPlain(data)) throw new RangeError('challenge data must be an object');
+  const v = data.v ?? (data.ruleset === RULESET_V3 ? CHALLENGE_VERSION_V2 : CHALLENGE_VERSION);
+  const fields = fieldsOf(v);
+  if (!fields) throw new RangeError('invalid challenge: unknown_version');
   const out = {};
-  if (isPlain(data.extra)) for (const [k, v] of Object.entries(data.extra)) if (!Object.hasOwn(FIELDS, k)) put(out, k, v);
-  for (const name of FIELD_NAMES) if (data[name] !== undefined && data[name] !== null) out[name] = data[name];
-  out.v ??= CHALLENGE_VERSION;
-  out.ruleset ??= RULESET;
-  const errors = fieldErrors(out);
+  if (isPlain(data.extra)) for (const [k, x] of Object.entries(data.extra)) if (!Object.hasOwn(fields, k)) put(out, k, x);
+  for (const name of Object.keys(fields)) if (data[name] !== undefined && data[name] !== null) out[name] = data[name];
+  out.v = v;
+  out.ruleset ??= v === CHALLENGE_VERSION_V2 ? RULESET_V3 : RULESET;
+  const errors = fieldErrors(out, fields);
   if (errors.length) throw new RangeError(`invalid challenge: ${errors.join(', ')}`);
   return PREFIX + canonicalJson(out);
 }
 
-// -> {ok, config, errors, warnings}. config holds the closed-set fields that are present, the
-// ship already resolved against the registry, and `extra` with every unknown field preserved.
+// -> {ok, config, errors, warnings}. config holds the closed-set fields of its version that are
+// present, the ship already resolved against the registry, and `extra` with every unknown field
+// preserved. Error contract (frozen pins, NOTE 14): not_text, too_long, no_prefix, invalid_json,
+// duplicate_key, not_object, missing_v, unknown_version, then missing_<field> / invalid_<field>.
 export function decodeChallenge(text) {
   const fail = (...errors) => ({ok: false, config: null, errors, warnings: []});
   if (typeof text !== 'string') return fail('not_text');
@@ -91,19 +128,21 @@ export function decodeChallenge(text) {
   let obj;
   try { obj = strictJson(text.slice(PREFIX.length)); } catch (err) { return fail(err?.code === 'duplicate_key' ? 'duplicate_key' : 'invalid_json'); }
   if (!isPlain(obj)) return fail('not_object');
-  if (Object.hasOwn(obj, 'v') && obj.v !== CHALLENGE_VERSION) return fail('unknown_version');
-  const errors = fieldErrors(obj);
+  if (!Object.hasOwn(obj, 'v')) return fail('missing_v');
+  const fields = fieldsOf(obj.v);
+  if (!fields) return fail('unknown_version');
+  const errors = fieldErrors(obj, fields);
   if (errors.length) return fail(...errors);
   const warnings = [];
   const config = {};
-  for (const name of FIELD_NAMES) if (Object.hasOwn(obj, name)) config[name] = obj[name];
+  for (const name of Object.keys(fields)) if (Object.hasOwn(obj, name)) config[name] = obj[name];
   if (!SHIP_IDS.includes(config.ship)) {
     warnings.push(`unknown_ship ${config.ship}: using ${SHIP_DEFAULT}`);
     config.ship_requested = config.ship;
     config.ship = SHIP_DEFAULT;
   }
   config.extra = {};
-  for (const k of Object.keys(obj)) if (!Object.hasOwn(FIELDS, k)) put(config.extra, k, obj[k]);
+  for (const k of Object.keys(obj)) if (!Object.hasOwn(fields, k)) put(config.extra, k, obj[k]);
   return {ok: true, config, errors: [], warnings};
 }
 
@@ -111,7 +150,7 @@ export function decodeChallenge(text) {
 // when the registry did not know it, goes back out unchanged).
 export function configData(config) {
   const data = {};
-  for (const name of FIELD_NAMES) if (config[name] !== undefined) data[name] = config[name];
+  for (const name of Object.keys(fieldsOf(config.v) ?? FIELDS)) if (config[name] !== undefined) data[name] = config[name];
   if (config.ship_requested !== undefined) data.ship = config.ship_requested;
   if (isPlain(config.extra) && Object.keys(config.extra).length) {
     data.extra = {};
@@ -121,21 +160,31 @@ export function configData(config) {
 }
 
 export function bannerText(config) {
+  if (config?.v === CHALLENGE_VERSION_V2 && Number.isSafeInteger(config.dist)) {
+    return `BEAT ${formatKm(config.dist)} KM - ${MODE_LABELS[config.mode] ?? config.mode} - SEED ${config.seed}`;
+  }
   return Number.isInteger(config?.score) ? `BEAT ${config.score} - SEED ${config.seed}` : `CHALLENGE - SEED ${config?.seed}`;
 }
 
-// QR-4: apply a decoded config through the same lobby paths as manual configuration. `lobby`
-// is the client loop's port: changeSetting(key, value) (the lobby setting path, which persists
-// and drives the music and renderer setters), chooseShip(id) (pl-ship + setShip), setSeed(seed)
-// (the seed the next Play starts) and setChallenge({score, seed, text}) (the banner).
+// QR-4 and spec 22 scan apply: a decoded config goes through the same lobby paths as manual
+// configuration, then the run starts directly (owner: 'jump immediately'). `lobby` is the client
+// loop's port: changeSetting(key, value) (the lobby setting path, which persists and drives the
+// music and renderer setters), chooseShip(id) (pl-ship + setShip), setSeed(seed) (the seed the
+// next run starts), setMode(mode) (the lobby mode, v2 only), setChallenge({...}) (the banner and
+// the ruleset the challenge seed is played with: a legacy v1 code stays a pl-v2 timed run,
+// R35.6) and play() (start the preset session now). setMode and play are optional hooks.
 export function applyChallenge(config, lobby) {
+  const v2 = config.v === CHALLENGE_VERSION_V2;
   lobby.changeSetting('music_level', config.music_level);
   lobby.changeSetting('mute', config.mute);
   lobby.changeSetting('quality', config.quality);
   lobby.changeSetting('reduced_motion', config.reduced_motion);
   lobby.chooseShip(config.ship);
+  if (v2) lobby.setMode?.(config.mode);
   lobby.setSeed(config.seed);
-  lobby.setChallenge({score: config.score ?? null, seed: config.seed, text: bannerText(config)});
+  lobby.setChallenge({score: config.score ?? null, seed: config.seed, text: bannerText(config),
+    ruleset: v2 ? RULESET_V3 : RULESET, mode: v2 ? config.mode : null, dist: v2 ? config.dist : null});
+  lobby.play?.();
 }
 
 // ------------------------------------------------------------------ scan overlay (QR-3)
@@ -188,22 +237,59 @@ export function createScanOverlay({document: doc = globalThis.document, navigato
     return result;
   }
 
+  // Spec 23 bottom sheet (layout only): while the soft keyboard is up the visual viewport is
+  // shorter than the layout viewport; the sheet is lifted by that inset (--kb) and capped to the
+  // visible height (--vvh), so the status line, the code and the Apply / Close row stay on screen.
+  let viewport = null;
+  function fitSheet() {
+    if (!dialog || !viewport) return;
+    const win = doc.defaultView ?? globalThis;
+    const inner = Number(win.innerHeight) || viewport.height;
+    const kb = Math.max(0, Math.round(inner - viewport.height - (viewport.offsetTop || 0)));
+    dialog.style?.setProperty?.('--kb', `${kb}px`);
+    dialog.style?.setProperty?.('--vvh', `${Math.round(viewport.height)}px`);
+  }
+  function watchViewport() {
+    if (viewport) return;
+    viewport = doc.defaultView?.visualViewport ?? null;
+    if (!viewport) return;
+    viewport.addEventListener?.('resize', fitSheet);
+    viewport.addEventListener?.('scroll', fitSheet);
+    fitSheet();
+  }
+  function unwatchViewport() {
+    if (!viewport) return;
+    viewport.removeEventListener?.('resize', fitSheet);
+    viewport.removeEventListener?.('scroll', fitSheet);
+    viewport = null;
+  }
+
   function showPaste(message) {
     stopCamera();
     mode = 'paste';
+    if (dialog) dialog.dataset.mode = 'paste';
     setStatus(message, 'info');
+    watchViewport();
     if (pasteBox) { pasteBox.hidden = false; textarea.focus?.(); return; }
     pasteBox = el('div', 'scan-paste');
     textarea = el('textarea', 'scan-code');
     textarea.rows = 4;
     textarea.spellcheck = false;
     textarea.setAttribute('autocomplete', 'off');
+    textarea.setAttribute('autocapitalize', 'off');
+    textarea.setAttribute('autocorrect', 'off');
     textarea.setAttribute('aria-label', 'Challenge code');
     textarea.placeholder = 'PLR1:{...}';
+    textarea.addEventListener('focus', () => fitSheet());
+    const actions = el('div', 'scan-actions');
     const apply = el('button', 'primary scan-apply', 'Apply');
     apply.type = 'button';
     apply.addEventListener('click', () => handleText(textarea.value));
-    pasteBox.append(textarea, apply);
+    const dismiss = el('button', 'scan-sheet-close', 'Close');
+    dismiss.type = 'button';
+    dismiss.addEventListener('click', () => close());
+    actions.append(apply, dismiss);
+    pasteBox.append(textarea, actions);
     body.append(pasteBox);
     textarea.focus?.();
   }
@@ -251,6 +337,7 @@ export function createScanOverlay({document: doc = globalThis.document, navigato
 
   function build() {
     dialog = el('dialog', 'scan');
+    dialog.dataset.mode = 'camera';
     dialog.setAttribute('aria-label', 'Scan challenge');
     const head = el('div', 'scan-head');
     head.append(el('h2', 'scan-title', 'Scan challenge'));
@@ -291,6 +378,7 @@ export function createScanOverlay({document: doc = globalThis.document, navigato
     if (!opened) return;
     opened = false; session++; mode = 'closed';
     stopCamera();
+    unwatchViewport();
     const d = dialog;
     dialog = null;
     if (d) {

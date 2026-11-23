@@ -2,7 +2,7 @@
    Convention for the client loop: add class "running" to <body> while a run is in progress
    (HUD and touch controls visible); remove it when the lobby opens. */
 :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#101323;color:#eef1ff;font-synthesis:none;
-  --edge:24px;--cyan:#69e2d3;--panel:#171c30;--line:#30374f}
+  --edge:24px;--cyan:#69e2d3;--panel:#171c30;--line:#30374f;--boost:#ffb347}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none;touch-action:none;-webkit-user-select:none;user-select:none}
 canvas#canvas{position:fixed;inset:0;width:100%;height:100%;display:block;background:#101323}
@@ -19,12 +19,15 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events
 /* HUD: status only, top of the screen, never intercepts the stick or buttons. */
 #hud{position:fixed;left:0;right:0;top:0;display:none;align-items:center;gap:14px;flex-wrap:wrap;
   padding:calc(10px + env(safe-area-inset-top)) calc(var(--edge) + env(safe-area-inset-right)) 10px calc(var(--edge) + env(safe-area-inset-left));
-  font-size:13px;font-weight:700;letter-spacing:.5px;font-variant-numeric:tabular-nums;pointer-events:none;text-shadow:0 1px 2px #000}
-#hud #hud-pause{pointer-events:auto;margin-left:auto;padding:6px 12px;font-size:13px}
+  font-size:16px;font-weight:700;letter-spacing:.5px;font-variant-numeric:tabular-nums;pointer-events:none;text-shadow:0 1px 2px #000}
+#hud #hud-pause{pointer-events:auto;margin-left:auto;min-height:44px;min-width:44px;padding:8px 14px;font-size:16px}
 #hud-energy{display:flex;align-items:center;gap:8px;min-width:150px}
 #hud-energy .bar{display:block;flex:1;height:10px;border:1px solid #3d4764;border-radius:6px;background:#0b0e1a;overflow:hidden}
 #hud-energy .bar i{display:block;height:100%;width:100%;background:var(--cyan);transition:none}
 #hud-energy[data-locked="true"] .bar i{background:#ff8e8e}
+/* pl-v3: the same meter shows the mobility charge (0..100); full charge (boost ready) turns amber. */
+#hud-energy[data-ready="true"] .bar i{background:var(--boost)}
+#hud-energy[data-ready="true"] .val{color:var(--boost);text-shadow:0 0 8px rgba(255,179,71,.8)}
 body.running #hud,body.running #touch{display:flex}
 #touch{display:none}
 
@@ -40,16 +43,59 @@ body.running #hud,body.running #touch{display:flex}
   display:flex;align-items:center;gap:12px}
 #cluster button{touch-action:none;padding:0;font-size:26px;line-height:1}
 #hop-left,#hop-right{width:64px;height:64px;border-radius:14px}
-#fire{width:72px;height:72px;border-radius:50%;background:#e03a3e;border:3px solid #ff8e8e}
+#fire{position:relative;width:72px;height:72px;border-radius:50%;background:#e03a3e;border:3px solid #ff8e8e}
 #fire:hover{background:#ef4a4e}
 #fire:active{background:#b92b2f}
+
+/* pl-v3 controls (spec 21, ruling R35.9, built by hud.js buildControls). Hop arrows: lit when the
+   sim state allows a hop (charge >= 25 and off cooldown), dimmed otherwise; presses still go to the
+   sim either way. */
+#cluster #hop-left[data-ready="true"],#cluster #hop-right[data-ready="true"]{border-color:var(--cyan);color:#fff;
+  box-shadow:0 0 0 1px var(--cyan) inset,0 0 14px rgba(105,226,211,.55)}
+#cluster #hop-left[data-ready="false"],#cluster #hop-right[data-ready="false"]{opacity:.38;filter:grayscale(.7)}
+/* Ammo badge: rocket count centred under the fire button, 16px text, never intercepts a touch. */
+#cluster .ammo{position:absolute;left:50%;bottom:-16px;transform:translateX(-50%);display:inline-flex;align-items:center;gap:3px;
+  min-width:44px;height:28px;padding:0 8px;border-radius:14px;border:2px solid var(--boost);background:#0b0f20;color:#ffe0b3;
+  font:800 16px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;pointer-events:none;white-space:nowrap}
+#cluster .ammo svg{width:14px;height:14px;fill:currentColor}
+#cluster .ammo[data-empty="true"]{border-color:#4c5a82;color:#8e9ab9}
+#cluster .ammo[hidden]{display:none}
+/* Boost: round 76 px button above the fire button. Ring = sim charge (stroke-dashoffset from hud.js).
+   States: spent (charge 0, dim, dashed rim), charging (cyan ring, percent label), ready (amber glow,
+   BOOST label, enabled). Disabled whenever the charge is below the cap. data-active: boosting. */
+#cluster #boost{position:absolute;left:74px;bottom:calc(100% + 16px);width:76px;height:76px;border-radius:50%;padding:0;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  background:radial-gradient(circle at 50% 38%,#1c2546,#0b0f20 72%);border:2px solid #3d4764;color:#8e9ab9;opacity:1}
+#cluster #boost[hidden]{display:none}
+#boost svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;fill:none;pointer-events:none}
+#boost .boost-track{stroke:#222b47;stroke-width:5}
+#boost .boost-ring{stroke:var(--cyan);stroke-width:5;stroke-linecap:round}
+#boost .boost-body,#boost .boost-fin,#boost .boost-nozzle{fill:currentColor}
+#boost .boost-port{fill:#0b0f20}
+#boost .boost-flame{fill:#ff6b3d;opacity:0;transform-box:fill-box;transform-origin:50% 0}
+#boost .boost-label{position:absolute;left:0;right:0;top:45px;text-align:center;
+  font:800 16px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.02em}
+#boost[data-state="spent"]{border-style:dashed}
+#boost[data-state="spent"] .boost-ring{opacity:0}
+#boost[data-state="charging"]{color:#cfd6f2}
+#boost[data-state="ready"]{color:#fff;border-color:var(--boost);
+  background:radial-gradient(circle at 50% 38%,#ff9a3d,#a8361f 70%,#4a1610);
+  box-shadow:0 0 0 2px rgba(255,179,71,.45),0 0 22px rgba(255,140,50,.85);animation:boost-ready 1.2s ease-in-out infinite}
+#boost[data-state="ready"] .boost-ring{stroke:#ffe08a}
+#boost[data-state="ready"] .boost-port{fill:#a8361f}
+#boost[data-state="ready"] .boost-label{text-shadow:0 0 6px #ff7a2a}
+#boost[data-active="true"]{border-color:#ff6b3d;color:#ffe0b3}
+#boost[data-active="true"] .boost-flame{opacity:1;animation:boost-flame .12s linear infinite alternate}
+#cluster #boost:disabled{cursor:default}
+@keyframes boost-ready{50%{box-shadow:0 0 0 3px rgba(255,179,71,.7),0 0 34px rgba(255,140,50,1)}}
+@keyframes boost-flame{to{transform:scaleY(1.3)}}
 
 #pause-overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(8,10,20,.72);z-index:20}
 #pause-overlay[hidden]{display:none}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:24px 28px;text-align:center}
 .panel h2{margin:0 0 6px}
 
-/* Lobby: space-game start modal. Procedural only (CSS gradients and inline SVG), no fetched assets.
+/* Lobby: space-game start modal. Procedural only (CSS gradients and inline SVG), no remote assets.
    Every animation below stops when Reduced motion is checked (#set-reduced-motion) or the OS asks for it. */
 dialog#lobby{--mag:#ff5bd6;--ink:#05060f;--glass:rgba(16,22,44,.62);--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   width:min(560px,calc(100vw - 16px));max-width:none;max-height:calc(100dvh - 16px);overflow:auto;padding:22px 22px 16px;
@@ -135,6 +181,18 @@ dialog#lobby::after{content:"";position:absolute;inset:8px;z-index:-1;pointer-ev
   background:linear-gradient(180deg,rgba(255,91,214,.24),rgba(18,23,44,.88));box-shadow:0 0 0 1px var(--mag) inset,0 0 16px rgba(255,91,214,.45)}
 #lobby .ships button.ship[aria-pressed=true] canvas{opacity:1;filter:drop-shadow(0 0 5px rgba(255,91,214,.55));transform:scale(1.08)}
 #lobby .ships button.ship[aria-pressed=true]::after{content:"";position:absolute;left:32%;right:32%;bottom:3px;height:2px;border-radius:2px;
+  background:var(--mag);box-shadow:0 0 6px var(--mag)}
+
+/* Mode selector (spec 21.6, built by app.js): DEATH / 90S / 120S in the ship picker's token
+   language. The chosen one (aria-pressed) is lit magenta; 48 px tall touch targets. */
+#lobby .modes{display:flex;gap:8px;margin:0 0 14px;padding:2px}
+#lobby .modes button.mode{flex:1 1 0;min-width:0;min-height:52px;flex-direction:column;gap:5px;padding:8px 4px;
+  color:#7d87a8;background:var(--glass);border-color:#2c3554}
+#lobby .modes .mode-name{font:800 16px/1 var(--mono);letter-spacing:.12em}
+#lobby .modes .mode-blurb{font:700 10px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;opacity:.8}
+#lobby .modes button.mode[aria-pressed=true]{color:#fff;border-color:var(--mag);
+  background:linear-gradient(180deg,rgba(255,91,214,.24),rgba(18,23,44,.88));box-shadow:0 0 0 1px var(--mag) inset,0 0 16px rgba(255,91,214,.45)}
+#lobby .modes button.mode[aria-pressed=true]::after{content:"";position:absolute;left:32%;right:32%;bottom:3px;height:2px;border-radius:2px;
   background:var(--mag);box-shadow:0 0 6px var(--mag)}
 
 /* Monospace data lines (selectable so a seed can be copied). */
@@ -300,20 +358,42 @@ dialog.scan [hidden]{display:none!important}
 .scan .scan-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 12px}
 .scan .scan-title{margin:0;font-size:20px;font-weight:900;font-style:italic;letter-spacing:.08em;text-transform:uppercase;
   background:linear-gradient(180deg,#fff 10%,var(--mag) 95%);-webkit-background-clip:text;background-clip:text;color:transparent}
-.scan button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:9px 14px;border-radius:12px;
+.scan button{display:inline-flex;align-items:center;justify-content:center;min-height:48px;padding:9px 14px;border-radius:12px;
   background:linear-gradient(180deg,rgba(40,50,84,.75),rgba(18,23,44,.85));border:1px solid #39446a;color:#dfe6ff;
-  font-weight:700;font-size:12px;letter-spacing:.12em;text-transform:uppercase}
+  font-weight:700;font-size:16px;letter-spacing:.12em;text-transform:uppercase}
 .scan button:hover{border-color:var(--cyan);box-shadow:0 0 14px rgba(105,226,211,.35)}
 .scan button.primary{color:#05060f;border:0;background:linear-gradient(100deg,#7ff3e4 0%,var(--cyan) 45%,#7c9bff 100%)}
 .scan .scan-body{display:flex;flex-direction:column;gap:10px}
 .scan .scan-video{display:block;width:100%;aspect-ratio:1;object-fit:cover;border-radius:14px;background:#02030a;
   border:1px solid rgba(105,226,211,.5);box-shadow:0 0 0 4px rgba(5,6,15,.9) inset,0 0 24px rgba(105,226,211,.25)}
-.scan .scan-status{margin:0;min-height:18px;font:12px/1.5 var(--mono);color:#cfd6f2;text-align:center}
+.scan .scan-status{margin:0;min-height:24px;font:15px/1.5 var(--mono);color:#cfd6f2;text-align:center}
 .scan .scan-status[data-kind=error]{color:#ff8e8e}
-.scan .scan-paste{display:flex;flex-direction:column;gap:8px}
-.scan .scan-code{width:100%;resize:vertical;min-height:84px;padding:10px;border-radius:10px;border:1px solid #4c5a82;background:#0b0f20;
-  color:#eef1ff;font:12px/1.4 var(--mono);-webkit-user-select:text;user-select:text;touch-action:auto}
+.scan .scan-paste{display:flex;flex-direction:column;gap:12px}
+/* 16px text: iOS zooms the page when a smaller field takes focus. */
+.scan .scan-code{width:100%;resize:vertical;min-height:96px;padding:12px;border-radius:12px;border:1px solid #4c5a82;background:#0b0f20;
+  color:#eef1ff;font:16px/1.4 var(--mono);-webkit-user-select:text;user-select:text;touch-action:auto}
 .scan .scan-code:focus-visible{outline:3px solid var(--cyan);outline-offset:2px}
+.scan .scan-actions{display:flex;flex-direction:column;gap:10px}
+.scan .scan-actions button{width:100%;min-height:52px;font-size:16px}
+.scan .scan-actions .scan-apply{color:#05060f;font-weight:900;letter-spacing:.2em}
+.scan .scan-actions .scan-sheet-close{min-height:48px;color:#fff;border-color:#8e9ab9;background:#1b2240}
+
+/* Paste bottom sheet (spec 23, challenge.js sets data-mode="paste"): docked to the bottom edge,
+   full width, lifted above the soft keyboard by --kb and capped to the visible height --vvh (both
+   from visualViewport). A flex column: title, status and the Apply / Close row keep their size and
+   only the code field shrinks, so the status line and both buttons stay on screen; the buttons sit
+   at the bottom, above the safe-area inset (thumb zone). */
+dialog.scan[data-mode=paste]{inset:auto 0 var(--kb,0px) 0;margin:0;width:100%;max-width:none;
+  max-height:min(calc(var(--vvh,100dvh) - 8px),calc(100dvh - 8px));padding:14px 16px calc(14px + max(0px,env(safe-area-inset-bottom) - var(--kb,0px)));
+  border-radius:20px 20px 0 0;border-bottom:0;overscroll-behavior:contain;animation:scan-sheet-in .22s ease-out}
+dialog.scan[data-mode=paste][open]{display:flex;flex-direction:column}
+dialog.scan[data-mode=paste] .scan-head{flex:none;margin-bottom:8px}
+dialog.scan[data-mode=paste] .scan-head .scan-close,dialog.scan[data-mode=paste] .scan-paste-toggle{display:none}
+dialog.scan[data-mode=paste] .scan-body,dialog.scan[data-mode=paste] .scan-paste{flex:1 1 auto;min-height:0}
+dialog.scan[data-mode=paste] .scan-status{flex:none;font-size:16px}
+dialog.scan[data-mode=paste] .scan-code{flex:1 1 auto;min-height:64px;resize:none}
+dialog.scan[data-mode=paste] .scan-actions{flex:none}
+@keyframes scan-sheet-in{from{transform:translateY(40px);opacity:0}to{transform:none;opacity:1}}
 
 /* Reduced motion: honour the lobby setting (the checkbox app.js keeps in sync) and the OS preference. */
 body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *::before,body:has(#set-reduced-motion:checked) *::after{animation:none!important;transition:none!important}
