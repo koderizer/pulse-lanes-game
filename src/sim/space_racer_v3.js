@@ -1,5 +1,5 @@
 // Ruleset pl-v3: the economy round (spec docs/specs/space-racer-v2.md sections 21 and 22,
-// rulings R35 and R35.14). Pure ES module: integer math only, no I/O, no wall clock and no
+// rulings R35 and R35.14) with the round-six onboarding tuning (section 25, ruling R36). Pure ES module: integer math only, no I/O, no wall clock and no
 // Math.random. Every random draw comes from a seeded stream of the run seed.
 //
 // Isolation (R35.1): src/sim/space_racer.js is never edited and its private helpers are not
@@ -60,8 +60,21 @@ const SHIP_TRAVEL_RADIUS = 92000;
 const DEAD_ZONE = 15;
 const THRUST_ACCEL_MAX = 250;
 const DRIFT_PER_CURVE = 30;
-const SPAWN_Z = 360000;
-const FIRST_ONSET_MIN = 120;
+// Section 25 (round six, ruling R36; FB3-TA7 NOTE 15 to NOTE 18).
+export const SPAWN_Z = 1080000; // NOTE 15: view, targeting gate and renderer depth band
+export const FIRST_ONSET_MIN = 240; // NOTE 16
+// NOTE 16: opening schedule [end tick (exclusive), percent]; onsets at or past the last end use
+// loopDensity(L).
+export const OPENING_DENSITY = Object.freeze([
+  Object.freeze([1200, 6]), Object.freeze([2400, 14]), Object.freeze([3600, 24])]);
+// NOTE 17: destruction ordinal k (1-based) <= length overrides the drop roll with kind
+// DROP_GUARANTEE[k - 1] (1 mineral, 2 gem); the stream draw is still consumed.
+export const DROP_GUARANTEE = Object.freeze([1, 1, 1, 2, 1]);
+// Section 25.5 (rulings R36.7, R36.8; FB3-TA8 NOTE 19 to NOTE 23): tutorial lane alignment and
+// supply floor for onsets below TUTORIAL_END. Private, as in the reference.
+const TUTORIAL_END = 1800;
+const SUPPLY_FLOOR = 7;
+const FILLER_GRID = 40;
 const SHAPE_COUNT = 8;
 const POSITION_ATTEMPTS = 8;
 const SALT_MAP = 0x00000000;
@@ -121,6 +134,12 @@ export function dropRolls(seed, n) {
 export function loopDensity(L) {
   const k = Math.floor(L / BASE_LOOPS);
   return Math.min(DENSITY_CAP, BASE.density[L % BASE_LOOPS] + DENSITY_STEP * k);
+}
+
+// NOTE 16 (section 25.2): density percent for an asteroid of absolute loop L with onset tick t.
+export function onsetDensity(L, t) {
+  for (const [end, percent] of OPENING_DENSITY) if (t < end) return percent;
+  return loopDensity(L);
 }
 
 // NOTE 3: the absolute loop ordinal is mixed into the spawn salt (mix32(0) = 0).
@@ -193,19 +212,23 @@ function loopRows(bases, seed, L, firstId) {
     const lane16 = 4 * lane.length;
     const score = [];
     for (let p = 0; p < lane16; p += BASE.grid16[b]) {
-      if (next() % 100 < density) {
+      // NOTE 16: the slot draw u is unchanged and kept per slot for the opening gate below.
+      const u = next() % 100;
+      if (u < density) {
         const value16 = VALUE16[next() % 5];
         const pitch = lane.low + (next() % 12);
-        score.push([p, value16, pitch]);
+        score.push([p, value16, pitch, u]);
       }
     }
-    if (score.length === 0) score.push([0, 4, lane.low]);
+    // The empty-score fallback has no slot draw and is never thinned (u = -1).
+    if (score.length === 0) score.push([0, 4, lane.low, -1]);
     for (let offset = 0; offset < span16; offset += lane16) {
-      for (const [pos16, value16, pitch] of score) {
+      for (const [pos16, value16, pitch, u] of score) {
         const k = offset + pos16;
         if (k >= span16) continue;
         const onset = start + fdiv(k * beatTicks, 4);
-        if (onset >= FIRST_ONSET_MIN) notes.push([onset, j, value16, pitch]);
+        // Section 25.2: an expanded onset is an asteroid only when u < onsetDensity(L, onset).
+        if (onset >= FIRST_ONSET_MIN && u < onsetDensity(L, onset)) notes.push([onset, j, value16, pitch]);
       }
     }
   }
@@ -216,7 +239,8 @@ function loopRows(bases, seed, L, firstId) {
     }
   }
 
-  return notes.map(([onset, lane, value16, pitch], i) => {
+  // Section 5.5 shape and position draws for one rock: [shape, radius, ax, ay].
+  const drawRock = pitch => {
     const shape = next() % SHAPE_COUNT;
     const radius = radiusOf(pitch);
     const lim = TUNNEL_RADIUS - radius;
@@ -226,8 +250,63 @@ function loopRows(bases, seed, L, firstId) {
       const py = (next() % (2 * lim + 1)) - lim;
       if (px * px + py * py <= lim * lim) { ax = px; ay = py; break; }
     }
-    return [firstId + i, L, lane, onset, value16, pitch, radius, hpOf(pitch), shape, ax, ay];
-  });
+    return [shape, radius, ax, ay];
+  };
+
+  // Every natural rock takes its draws first, in (onset, lane) order, whether or not section
+  // 25.5 later drops it (R36.8.1, NOTE 19). Rock: [lane, onset, value16, pitch, shape, radius, ax, ay].
+  const rocks = notes.map(([onset, lane, value16, pitch]) => [lane, onset, value16, pitch, ...drawRock(pitch)]);
+  let out = rocks;
+  if (start < TUTORIAL_END) out = tutorialRocks(rocks, base.lanes[START_LANE].low, next, drawRock);
+  return out.map(([lane, onset, value16, pitch, shape, radius, ax, ay], i) =>
+    [firstId + i, L, lane, onset, value16, pitch, radius, hpOf(pitch), shape, ax, ay]);
+}
+
+// Section 25.5 (rulings R36.7, R36.8; FB3-TA8 NOTE 19 to NOTE 23) for the loop that starts below
+// TUTORIAL_END. rocks are in (onset, lane) order with their natural draws already taken.
+function tutorialRocks(rocks, low, next, drawRock) {
+  // R36.8.1 (NOTE 19): onset < TUTORIAL_END forced to START_LANE; the later rock whose
+  // (START_LANE, onset) is already taken is dropped (its draws stay consumed).
+  const out = [];
+  const taken = new Set();
+  for (const k of rocks) {
+    if (k[1] < TUTORIAL_END) {
+      if (taken.has(k[1])) continue;
+      taken.add(k[1]);
+      k[0] = START_LANE;
+    }
+    out.push(k);
+  }
+  // R36.8.2 (NOTE 20): the floor counts survivors in [FIRST_ONSET_MIN, TUTORIAL_END).
+  let have = 0;
+  for (const k of out) if (k[1] >= FIRST_ONSET_MIN && k[1] < TUTORIAL_END) have++;
+  const fill = Math.max(0, SUPPLY_FLOOR - have);
+  const W = TUTORIAL_END - FIRST_ONSET_MIN;
+  for (let i = 0; i < fill; i++) {
+    // R36.8.3 (NOTE 21): grid-snapped midpoint (round half up); taken or out-of-window onsets
+    // probe +40, -40, +80, -80, ... inside [FIRST_ONSET_MIN, TUTORIAL_END).
+    const mid = FIRST_ONSET_MIN + FILLER_GRID * Math.round(fdiv((2 * i + 1) * W, 2 * fill) / FILLER_GRID);
+    let onset = mid;
+    for (let step = 1; taken.has(onset) || onset < FIRST_ONSET_MIN || onset >= TUTORIAL_END; step++) {
+      if (step > 2 * W) throw new Error('internal: no free filler onset');
+      onset = mid + (step % 2 ? 1 : -1) * FILLER_GRID * Math.ceil(step / 2);
+    }
+    taken.add(onset);
+    // R36.8.4 (NOTE 22): filler draws after every natural draw of the loop: slot draw (kept
+    // regardless), value16, pitch, shape, position attempts. No generation-time drop draw.
+    next();
+    const value16 = VALUE16[next() % 5];
+    const pitch = low + (next() % 12);
+    out.push([START_LANE, onset, value16, pitch, ...drawRock(pitch)]);
+  }
+  // R36.8.5 (NOTE 23): rows renumbered in (onset, lane) order, fillers included.
+  out.sort((a, c) => (a[1] - c[1]) || (a[0] - c[0]));
+  for (let i = 1; i < out.length; i++) {
+    if (out[i][1] === out[i - 1][1] && out[i][0] === out[i - 1][0]) {
+      throw new Error('internal: one asteroid per lane per onset violated');
+    }
+  }
+  return out;
 }
 
 export function loopCourse(seed, L) {
@@ -344,7 +423,10 @@ export function createGame(seed, mode) {
     destroyed++;
     events.push([t, 6, r[0], code]);
     // NOTE 6, R35.12: exactly one drop draw per destruction, in destruction-call order.
-    const kind = dropKind(dropNext() % 100);
+    const rolled = dropKind(dropNext() % 100);
+    // NOTE 17 (section 25.3): ordinal = destroyed (1-based, just incremented) overrides the roll;
+    // the draw above is still consumed so later ordinals keep their stream positions.
+    const kind = destroyed <= DROP_GUARANTEE.length ? DROP_GUARANTEE[destroyed - 1] : rolled;
     if (kind !== 0) {
       pickups.set(r[0], {id: r[0], kind, lane: r[2], x: r[9], y: r[10], onset: r[3], speed: NOTE_SPEED[r[4]]});
     }

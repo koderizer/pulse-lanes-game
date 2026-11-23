@@ -22,7 +22,7 @@ import {applyChallenge, createScanOverlay} from './challenge.js';
 const BUILD = 'pl-web-0.2.0';
 // Spec section 2 SPAWN_Z (mu). The sim module keeps this constant private, so it is handed to the
 // renderers as a depth floor; they also extend visible depth to the largest z seen in view rows.
-const SPAWN_Z = 360000;
+const SPAWN_Z = 1080000;
 const TICK_MS = 1000 / TICKS_PER_SECOND;
 const MAX_FRAME_MS = 250;
 const IDLE_MS = 300000;

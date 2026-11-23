@@ -13,7 +13,7 @@ export const MU = 1000;
 export const SEG = 120;            // world units per beat segment along the tube
 export const LANE_SPACING = 330;   // centre to centre; tube diameter is 200
 export const TUBE_R = 100;         // TUNNEL_RADIUS / MU
-export const DEFAULT_SPAWN_Z = 360000;
+export const DEFAULT_SPAWN_Z = 1080000;
 const RES = 16;                    // centreline samples per beat
 const BLEND_BEATS = 1;             // centreline cross-fade at a loop seam
 const MAX_OFF_X = 50, MAX_OFF_Y = 60; // keeps neighbouring tubes apart (330 - 2 * 50 > 200)
