@@ -71,7 +71,8 @@ export function formatHud(state, map = null) {
 
 // Builds the pl-v3 controls once (index.html stays unchanged): the round #boost button with an
 // inline rocket-booster SVG and its charge ring, placed in #cluster above #fire, and the #hud-ammo
-// rocket count badge on #fire. Returns {boost, ammo}; an existing build is reused.
+// rocket count badge under #fire (also the rocket-latch button). Returns {boost, ammo}; an existing
+// build is reused.
 export function buildControls(doc) {
   const cluster = doc.getElementById('cluster'), fire = doc.getElementById('fire');
   let boost = doc.getElementById('boost'), ammo = doc.getElementById('hud-ammo');
@@ -112,13 +113,22 @@ export function buildControls(doc) {
     cluster.append(boost);
   }
   if (fire && !ammo) {
-    ammo = doc.createElement('span');
+    // Spec 26.2.3 (FB3-WEB4): the badge is the mobile rocket-latch toggle, a real button with
+    // aria-pressed. It is the next sibling of #fire (a button never nests in a button) and keeps
+    // the same box: `#cluster .ammo` is absolute and #cluster is the fixed flex row whose centre is
+    // the fire button's centre and whose bottom is its bottom, so the geometry at 390x844 is
+    // unchanged. lobby.css sets pointer-events:none on the badge; the inline value re-enables taps.
+    ammo = doc.createElement('button');
+    ammo.type = 'button';
     ammo.id = 'hud-ammo';
     ammo.className = 'ammo';
-    ammo.setAttribute('aria-hidden', 'true');
+    ammo.setAttribute('aria-pressed', 'false');
+    ammo.setAttribute('aria-label', 'Rockets (R): off');
+    ammo.style.setProperty('pointer-events', 'auto');
     ammo.dataset.empty = 'true';
     const icon = doc.createElementNS(SVG_NS, 'svg');
     icon.setAttribute('viewBox', '0 0 16 16');
+    icon.setAttribute('aria-hidden', 'true');
     icon.setAttribute('focusable', 'false');
     const p = doc.createElementNS(SVG_NS, 'path');
     p.setAttribute('d', 'M8 1.5c1.8 1.4 2.5 3.4 2.5 5.6V11h-5V7.1c0-2.2.7-4.2 2.5-5.6zM5.5 8L3.5 10.5v2.5l2-1zM10.5 8l2 2.5v2.5l-2-1zM6.8 11.5h2.4L8 14.5z');
@@ -127,9 +137,27 @@ export function buildControls(doc) {
     n.className = 'ammo-n';
     n.textContent = '0';
     ammo.append(icon, n);
-    fire.append(ammo);
+    fire.after(ammo);
   }
   return {boost, ammo};
+}
+
+// Paints the rocket latch (state lives in app.js only): aria-pressed on the badge and on #fire,
+// plus the rocket tint on #fire (amber rim and glow in the --boost colour of the badge rim; the
+// 3 px border width and the box are unchanged, so nothing moves).
+export function paintRocketLatch(doc, on) {
+  const pressed = String(Boolean(on));
+  const ammo = doc.getElementById('hud-ammo'), fire = doc.getElementById('fire');
+  if (ammo) {
+    ammo.setAttribute('aria-pressed', pressed);
+    ammo.setAttribute('aria-label', `Rockets (R): ${on ? 'on' : 'off'}`);
+  }
+  if (fire) {
+    fire.setAttribute('aria-pressed', pressed);
+    fire.dataset.rocket = pressed;
+    fire.style.setProperty('border-color', on ? 'var(--boost)' : '');
+    fire.style.setProperty('box-shadow', on ? '0 0 0 2px rgba(255,179,71,.55),0 0 18px rgba(255,140,50,.85)' : '');
+  }
 }
 
 export function renderHud(root, state, map = null) {

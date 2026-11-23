@@ -8,9 +8,20 @@
 // [t, 3, code, shots] event) is exactly a rise of state.fire_ready from the row before tick t to
 // the row after it, and its weapon code is WEAPONS[row_before.weapon].code (1 laser, 2 rocket).
 
+//
+// Spec 26.4 (FB3-WEB4): app.js also hands this module the sim's destroying events
+// [t, 6, id, code, pickup_kind, amount]; destroyed(kind) voices explode plus the energy ping of
+// the dropped pickup. Same gate (music.ready()) and the same per-voice teardown as laser/rocket.
+
 export const SFX_CODES = Object.freeze({laser: 1, rocket: 2});
+// Energy ping pitch per pickup tier (spec 26.4.1): rises small -> normal -> large; gem is a
+// distinct two-tone interval (a rising fourth on a higher base) instead of a single ping.
+export const ENERGY_TIERS = Object.freeze({mineral_small: 1, mineral_normal: 1.25, mineral_large: 1.55});
+export const GEM_TONES = Object.freeze([1.5, 2]);
 const LASER = {gain: 0.3, attack: 0.004, length: 0.14, from: 1800, to: 240};
 const ROCKET = {gain: 0.6, attack: 0.03, length: 0.5, cutoffFrom: 260, cutoffTo: 3400, q: 1.4, thump: 70};
+const EXPLODE = {gain: 0.55, attack: 0.004, length: 0.42, cutoffFrom: 2400, cutoffTo: 140, q: 0.8, thump: 52};
+const ENERGY = {gain: 0.2, attack: 0.003, length: 0.16, base: 1320, gap: 0.075};
 const NOISE_SECONDS = 0.6;
 
 // Deterministic white noise (xorshift32), so the whoosh needs no randomness source.
@@ -66,19 +77,88 @@ export class Sfx {
     osc.onended = () => { osc.disconnect(); env.disconnect(); };
     return 1;
   }
-  // Noise-buffer whoosh through a low-pass whose cutoff rises, plus a short low sine thump.
-  rocket() {
-    const {context, gain} = this.music;
-    if (typeof context.createBiquadFilter !== 'function') return 0;
-    const now = context.currentTime, end = now + ROCKET.length;
+  // One rock destroyed (spec 26.4.1): explosion plus the energy ping of its pickup tier. Returns
+  // the number of sources started (0 when gated). An unknown or missing kind voices explode only.
+  destroyed(kind) {
+    if (!this.music.ready()) return 0;
+    let started = 0;
+    try {
+      const {context} = this.music;
+      started += this.explode(context);
+      if (kind !== undefined && kind !== null) started += this.energy(context, kind);
+    } catch (err) {
+      console.warn('sfx unavailable:', err?.message ?? err);
+    }
+    return started;
+  }
+  // The noise buffer, built lazily once per context (shared by the rocket whoosh and explode).
+  noiseFor(context) {
     if (!this.noise || this.noiseContext !== context) {
       const length = Math.max(1, Math.round(context.sampleRate * NOISE_SECONDS));
       const buffer = context.createBuffer(1, length, context.sampleRate);
       fillNoise(buffer.getChannelData(0));
       this.noise = buffer; this.noiseContext = context;
     }
+    return this.noise;
+  }
+  // Explosion: noise burst through a low-pass whose cutoff falls, plus a short low sine thump.
+  explode(context) {
+    const {gain} = this.music;
+    if (typeof context.createBiquadFilter !== 'function') return 0;
+    const now = context.currentTime, end = now + EXPLODE.length;
     const src = context.createBufferSource(), filter = context.createBiquadFilter(), env = context.createGain();
-    src.buffer = this.noise;
+    src.buffer = this.noiseFor(context);
+    filter.type = 'lowpass';
+    filter.Q.value = EXPLODE.q;
+    filter.frequency.setValueAtTime(EXPLODE.cutoffFrom, now);
+    filter.frequency.exponentialRampToValueAtTime(EXPLODE.cutoffTo, end);
+    env.gain.setValueAtTime(0, now);
+    env.gain.linearRampToValueAtTime(EXPLODE.gain, now + EXPLODE.attack);
+    env.gain.exponentialRampToValueAtTime(0.001, end);
+    src.connect(filter); filter.connect(env); env.connect(gain);
+    src.start(now); src.stop(end + 0.02);
+    src.onended = () => { src.disconnect(); filter.disconnect(); env.disconnect(); };
+    const thump = context.createOscillator(), tenv = context.createGain();
+    thump.type = 'sine';
+    thump.frequency.setValueAtTime(EXPLODE.thump * 2, now);
+    thump.frequency.exponentialRampToValueAtTime(EXPLODE.thump, now + 0.16);
+    tenv.gain.setValueAtTime(0, now);
+    tenv.gain.linearRampToValueAtTime(EXPLODE.gain, now + 0.008);
+    tenv.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+    thump.connect(tenv); tenv.connect(gain);
+    thump.start(now); thump.stop(now + 0.28);
+    thump.onended = () => { thump.disconnect(); tenv.disconnect(); };
+    return 2;
+  }
+  // Energy: bright short triangle ping, base pitch x ENERGY_TIERS[tier]; a gem plays two pings a
+  // rising fourth apart (GEM_TONES). Returns the number of pings started (0 for an unknown tier).
+  energy(context, tier) {
+    const tones = tier === 'gem' ? GEM_TONES : ENERGY_TIERS[tier] ? [ENERGY_TIERS[tier]] : [];
+    const now = context.currentTime;
+    tones.forEach((k, i) => this.ping(context, ENERGY.base * k, now + i * ENERGY.gap));
+    return tones.length;
+  }
+  ping(context, frequency, at) {
+    const {gain} = this.music;
+    const end = at + ENERGY.length;
+    const osc = context.createOscillator(), env = context.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(frequency, at);
+    osc.frequency.exponentialRampToValueAtTime(frequency * 1.06, at + 0.03);
+    env.gain.setValueAtTime(0, at);
+    env.gain.linearRampToValueAtTime(ENERGY.gain, at + ENERGY.attack);
+    env.gain.exponentialRampToValueAtTime(0.001, end);
+    osc.connect(env); env.connect(gain);
+    osc.start(at); osc.stop(end + 0.02);
+    osc.onended = () => { osc.disconnect(); env.disconnect(); };
+  }
+  // Noise-buffer whoosh through a low-pass whose cutoff rises, plus a short low sine thump.
+  rocket() {
+    const {context, gain} = this.music;
+    if (typeof context.createBiquadFilter !== 'function') return 0;
+    const now = context.currentTime, end = now + ROCKET.length;
+    const src = context.createBufferSource(), filter = context.createBiquadFilter(), env = context.createGain();
+    src.buffer = this.noiseFor(context);
     filter.type = 'lowpass';
     filter.Q.value = ROCKET.q;
     filter.frequency.setValueAtTime(ROCKET.cutoffFrom, now);

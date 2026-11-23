@@ -3,14 +3,14 @@
 // New runs play pl-v3 (spec 21, ruling R35) in the lobby mode; the pl-v2 module stays for the
 // lobby backdrop, the shared tunnel geometry and a legacy (v1 challenge) pl-v2 run path.
 import {createGame, TICKS_PER_SECOND, MAX_TICKS, WEAPONS} from '../src/sim/space_racer.js';
-import {createGame as createGameV3, loopCourse, loopStart, MODES, MODE_TICKS, WEAPONS as WEAPONS_V3} from '../src/sim/space_racer_v3.js';
+import {createGame as createGameV3, loopCourse, loopStart, MODES, MODE_TICKS, validateInputs as validateInputsV3} from '../src/sim/space_racer_v3.js';
 import {newSave, importSave, exportSave, STORAGE_KEY} from '../src/state/pilot_state.js';
 import {quantizeStick, keyboardStick, MAX_RADIUS_PX, CAPTURE_RADIUS_PX} from '../src/input/controls.js';
 import {digest} from './digest.js';
 import {Music} from './music.js';
 import {ScoreVoice} from './score_voice.js';
 import {Sfx} from './sfx.js';
-import {renderHud, buildControls, formatKm, MODE_LABELS} from './hud.js';
+import {renderHud, buildControls, formatKm, MODE_LABELS, paintRocketLatch} from './hud.js';
 import {createPause} from './pause.js';
 import {applySetting, defaultSettings, lastResultText, retryEnabled, SETTING_CONTROLS} from './lobby_model.js';
 import {createRenderer} from './render.js';
@@ -51,8 +51,16 @@ let runRuleset = 'pl-v3', runMode = 'death', scoreMap = null, courseLoops = 0, r
 // rocket row is lost between frames.
 const TRAIL_TICKS = 24;
 let trail = [];
+// Spec 26.1.3 / 26.2.3 rocket latch: the single source of truth (R and the ammo badge toggle it,
+// hud.js only paints it). While on, every pl-v3 input entry ORs in bit4 (16, rocket selected for
+// that tick). ROCKET_BIT: the loaded pl-v3 validator admits buttons 0..31 (R38.3); against a sim
+// that still refuses bit4 the latch stays a display toggle instead of failing every step().
+const ROCKET_BIT = (() => { try { validateInputsV3([[0, 16, 0, 0]], 'death'); return true; } catch { return false; } })();
+let rocketLatch = false;
+// Index of the next pl-v3 trace event not yet voiced (spec 26.4 cue wiring).
+let eventCursor = 0;
 const held = {w: false, a: false, s: false, d: false};
-let stickPointer = null, touchStick = [0, 0];
+let stickPointer = null, touchStick = [0, 0], stickOrigin = null;
 // Ship model (spec 19, ruling R33): the lobby choice, and the model locked in when a run starts
 // (that one goes on the card). Presentation only; the sim never sees it.
 let shipId = shipIdOrDefault(null), runShip = shipId;
@@ -383,7 +391,8 @@ function start(nextSeed) {
   prevState = currState = game.state(); view = game.view();
   trail = [{p: currState.processed, state: currState, view}];
   recorded = false; running = true; hops = []; fires = 0; boosts = 0; runBoosts = 0; lastSent = [0, 0];
-  accumulator = 0; previousFrame = null;
+  accumulator = 0; previousFrame = null; eventCursor = 0;
+  setRocketLatch(false); // a run starts on the laser (ammo starts at 0)
   music.reset(); voice.setMap(scoreMap);
   beginSession(); music.gesture(); persist();
   renderer.setCourse(map, course);
@@ -454,14 +463,48 @@ function takeHop(t) {
   }
   return best < 0 ? null : hops.splice(best, 1)[0].dir;
 }
+function setRocketLatch(on) {
+  rocketLatch = Boolean(on);
+  paintRocketLatch(document, rocketLatch);
+}
+function toggleRocketLatch() { music.gesture(); setRocketLatch(!rocketLatch); }
+// Spec 26.4.1 cue wiring: voice the pl-v3 events produced since the last call. A tick can carry an
+// accepted fire [t, 3, code, shots] only when fire_ready rises and a destroying event only when
+// destroyed rises, so the trace is read on those ticks alone. Refusals [t, 6, 1] / [t, 6, 2] are
+// 3 fields long; the destroying event is [t, 6, id, code, pickup_kind, amount] (R38.4), and a
+// 4-field [t, 6, id, code] from a pre-26.3 sim still voices the explosion.
+// R38.7 (FB3-REV4 E-1): the frozen pl-v3 destroying event encodes the pickup as numeric
+// kind 1 (mineral) / 2 (gem) plus an amount (NOTE 27). sfx.energy speaks tier names, so
+// derive the tier from the shipped tuple here in the bridge (the oracle stays authoritative).
+function pickupTier(kind, amount) {
+  if (kind === 2) return 'gem';
+  if (kind !== 1) return null;
+  return amount >= 50 ? 'mineral_large' : amount >= 25 ? 'mineral_normal' : 'mineral_small';
+}
+function voiceEvents(prev, curr) {
+  if (!(curr.fire_ready > prev.fire_ready || curr.destroyed > prev.destroyed)) return;
+  const events = game.trace().events;
+  for (let i = eventCursor; i < events.length; i++) {
+    const e = events[i];
+    if (e[1] === 3 && e.length === 4) sfx.fire(e[2]);
+    else if (e[1] === 6 && e.length >= 4) {
+      const [, , , , pickupKind, amount] = e;
+      sfx.destroyed(e.length === 6 && Number.isInteger(pickupKind) && Number.isInteger(amount) ? pickupTier(pickupKind, amount) : null);
+    }
+  }
+  eventCursor = events.length;
+}
 function tickOnce() {
   const t = game.state().processed;
+  const v3 = runRuleset === 'pl-v3';
   let buttons = 0;
   const hop = takeHop(t);
   if (hop) buttons |= hop === 'left' ? 1 : 2;
   if (fires > 0) { fires--; buttons |= 4; }
   // Spec 21.1: bit3 boost, an edge press like fire (one per tick, extras queue). pl-v2 stays 0..7.
   if (boosts > 0) { boosts--; if (runRuleset === 'pl-v3') buttons |= 8; }
+  // Spec 26.2.1: bit4 on every pl-v3 entry while the rocket latch is on (an entry every tick).
+  if (rocketLatch && v3 && ROCKET_BIT) buttons |= 16;
   const stick = currentStick();
   const entries = [];
   if (buttons || stick[0] !== lastSent[0] || stick[1] !== lastSent[1]) {
@@ -470,7 +513,6 @@ function tickOnce() {
   }
   prevState = currState;
   currState = game.step(1, entries);
-  const v3 = runRuleset === 'pl-v3';
   if (v3) {
     ensureCourse(currState.loop);
     if (currState.boost_until > prevState.boost_until) runBoosts++; // boost_until moves only on a boost
@@ -484,8 +526,10 @@ function tickOnce() {
   const beatTick = v3 ? t % V3_CYCLE_TICKS : t;
   music.beat(beatTick);
   voice.beat(beatTick, currState.lane);
-  // W4c R-2: a fire_ready rise across tick t is the sim's [t, 3, code, shots] event (read-only rows).
-  sfx.tick(prevState, currState, v3 ? WEAPONS_V3 : WEAPONS);
+  // pl-v3: shot, explosion and energy cues from the sim events (spec 26.4). pl-v2 keeps the W4c
+  // R-2 path: a fire_ready rise across tick t is its [t, 3, code, shots] event (read-only rows).
+  if (v3) voiceEvents(prevState, currState);
+  else sfx.tick(prevState, currState, WEAPONS);
   if (currState.status === 'ended') finishRun();
 }
 
@@ -513,21 +557,30 @@ function frame(timestamp) {
 const stickEl = $('stick'), knob = stickEl.querySelector('.knob');
 function stickCentre() { const r = stickEl.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; }
 function setStickFromPointer(event) {
-  const [x, y] = stickCentre();
+  const [x, y] = stickOrigin || stickCentre();
   const dx = event.clientX - x, dy = event.clientY - y, m = Math.hypot(dx, dy), k = m > MAX_RADIUS_PX ? MAX_RADIUS_PX / m : 1;
   touchStick = quantizeStick(dx * k, dy * k, MAX_RADIUS_PX);
   knob.style.setProperty('--kx', `${dx * k}px`); knob.style.setProperty('--ky', `${dy * k}px`);
 }
 function releaseStick() {
-  stickPointer = null; touchStick = [0, 0];
+  stickPointer = null; touchStick = [0, 0]; stickOrigin = null;
   knob.style.setProperty('--kx', '0px'); knob.style.setProperty('--ky', '0px');
 }
+// Spec 26.1.2: the single stick pointer is captured by a pointerdown on the thumbpad (within the
+// capture radius, as before) or anywhere on the game canvas. A pointerdown on any button (fire,
+// boost, hops, ammo badge, pause) never captures: those keep their own handlers.
 document.addEventListener('pointerdown', event => {
   music.gesture();
   if (!running || stickPointer !== null) return;
+  if (event.target?.closest?.('button')) return;
   const [x, y] = stickCentre();
-  if (Math.hypot(event.clientX - x, event.clientY - y) > CAPTURE_RADIUS_PX) return;
+  const onCanvas = event.target === $('canvas'); // looked up live: the 2D fallback swaps the element
+  if (!onCanvas && Math.hypot(event.clientX - x, event.clientY - y) > CAPTURE_RADIUS_PX) return;
   stickPointer = event.pointerId;
+  // Spec 26.1.2 (R38.6): a canvas press outside the pad capture radius uses the press point
+  // as the virtual pad centre; a pad-internal drag keeps measuring from the pad centre.
+  stickOrigin = onCanvas && Math.hypot(event.clientX - x, event.clientY - y) > CAPTURE_RADIUS_PX
+    ? [event.clientX, event.clientY] : null;
   setStickFromPointer(event);
   event.preventDefault();
 });
@@ -540,7 +593,17 @@ for (const [id, kind] of [['hop-left', 'left'], ['hop-right', 'right'], ['fire',
   button.addEventListener('pointerdown', event => { event.preventDefault(); press(kind); });
   button.addEventListener('click', event => { if (event.detail === 0) press(kind); }); // keyboard activation only
 }
-const STICK_KEYS = {KeyW: 'w', KeyA: 'a', KeyS: 's', KeyD: 'd'};
+// Ammo badge = mobile rocket-latch toggle (spec 26.2.3), same press pattern as the cluster buttons.
+const ammoBadge = $('hud-ammo');
+if (ammoBadge) {
+  ammoBadge.addEventListener('pointerdown', event => { event.preventDefault(); toggleRocketLatch(); });
+  ammoBadge.addEventListener('click', event => { if (event.detail === 0) toggleRocketLatch(); }); // keyboard activation only
+}
+setRocketLatch(false);
+// Spec 26.1.1: WASD no longer steers (steering is pointer only, 26.1.2); no key feeds the stick.
+const STICK_KEYS = Object.freeze({});
+// Spec 26.1.1 / 26.1.3: one-shot presses through press(), exactly like the touch buttons.
+const PRESS_KEYS = Object.freeze({KeyA: 'left', KeyD: 'right', KeyW: 'boost'});
 document.addEventListener('keydown', event => {
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName) || lobby.open || gameOver.isOpen()) return;
   if (STICK_KEYS[event.code]) { held[STICK_KEYS[event.code]] = true; return; }
@@ -548,6 +611,9 @@ document.addEventListener('keydown', event => {
   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); press(event.key === 'ArrowLeft' ? 'left' : 'right'); }
   else if (event.code === 'Space') { event.preventDefault(); press('fire'); }
   else if (event.code === 'KeyB' || event.key === 'b' || event.key === 'B') { event.preventDefault(); press('boost'); }
+  else if (event.ctrlKey || event.metaKey || event.altKey) return; // browser shortcuts (reload, close tab) stay theirs
+  else if (PRESS_KEYS[event.code]) { event.preventDefault(); press(PRESS_KEYS[event.code]); }
+  else if (event.code === 'KeyR') { event.preventDefault(); toggleRocketLatch(); }
 });
 document.addEventListener('keyup', event => { if (STICK_KEYS[event.code]) held[STICK_KEYS[event.code]] = false; });
 window.addEventListener('blur', () => { for (const k of Object.keys(held)) held[k] = false; releaseStick(); });

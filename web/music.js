@@ -20,11 +20,21 @@ export class Music {
     if (!this.context) {
       const Audio = globalThis.AudioContext ?? globalThis.webkitAudioContext;
       if (!Audio) return;
-      this.context = new Audio();
-      this.gain = this.context.createGain();
-      this.gain.connect(this.context.destination);
-      this.setMute(this.muted);
-      this.context.addEventListener('statechange', () => this.drain());
+      // Spec 26.4.2 (R38.7, FB3-REV4 B-2): a throwing AudioContext constructor is a silent
+      // no-op, not a fatal error. Build fully or not at all, so a later gesture can retry.
+      try {
+        const ctx = new Audio();
+        const gain = ctx.createGain();
+        gain.connect(ctx.destination);
+        this.context = ctx;
+        this.gain = gain;
+        this.setMute(this.muted);
+        ctx.addEventListener('statechange', () => this.drain());
+      } catch {
+        this.context = null;
+        this.gain = null;
+        return;
+      }
     }
     if (this.attempt) {
       // Gestures in one stack coalesce. A gesture in a later task renews the pending attempt: a

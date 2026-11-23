@@ -1,5 +1,7 @@
 // Ruleset pl-v3: the economy round (spec docs/specs/space-racer-v2.md sections 21 and 22,
-// rulings R35 and R35.14) with the round-six onboarding tuning (section 25, ruling R36). Pure ES module: integer math only, no I/O, no wall clock and no
+// rulings R35 and R35.14) with the round-six onboarding tuning (section 25, ruling R36) and the
+// round-seven player weapon select and drop economy (sections 26.2 and 26.3, ruling R38; FB3-TA9
+// NOTE 24 to NOTE 29). Pure ES module: integer math only, no I/O, no wall clock and no
 // Math.random. Every random draw comes from a seeded stream of the run seed.
 //
 // Isolation (R35.1): src/sim/space_racer.js is never edited and its private helpers are not
@@ -28,8 +30,21 @@ export const SALT_DROP = 0x44524F50; // R35.12
 export const Z_SPEED = 1000; // NOTE 1, R35.14 Q5
 export const DENSITY_CAP = 60;
 export const DENSITY_STEP = 5;
-export const DROP_NONE_BELOW = 55;
-export const DROP_MINERAL_BELOW = 90;
+// NOTE 26 (section 26.3.3, R38): tier draw r = draw mod 100 from ordinal 6 on: r < 70 mineral
+// small (+10 charge), r < 90 mineral normal (+25), r < 95 mineral large (+50), else gem (+2
+// rockets). Every destruction drops (26.3.1), so the 21.4 "none" bucket is empty
+// (DROP_NONE_BELOW 0) and every r below DROP_MINERAL_BELOW (95) is a mineral.
+export const DROP_SMALL_BELOW = 70;
+export const DROP_NORMAL_BELOW = 90;
+export const DROP_LARGE_BELOW = 95;
+export const MINERAL_SMALL = 10;
+export const MINERAL_NORMAL = 25;
+export const MINERAL_LARGE = 50;
+export const DROP_NONE_BELOW = 0;
+export const DROP_MINERAL_BELOW = DROP_LARGE_BELOW;
+// NOTE 24 (section 26.2.1, ruling R38): buttons 0..31, bit4 (16) selects the rocket for this tick.
+export const BUTTONS_MAX = 31;
+export const ROCKET_SELECT = 16;
 
 // NOTE 7: pl-v2 weapon physics with energy_cost replaced by ammo_cost.
 export const WEAPONS = Object.freeze({
@@ -40,11 +55,12 @@ export const WEAPONS = Object.freeze({
 });
 
 // ------------------------------------------------------------ pl-v2 constants (section 2), private
+// NOTE 25 (R38.2): the pl-v2 song bar weapon column (laser, rocket, laser) is not carried by
+// pl-v3 at all; base loops keep no weapon field, so no pl-v3 path can fire from it.
 const BASE = Object.freeze({
   bpm: [90, 120, 150],
   beats: [60, 80, 100],
   lanes: [3, 4, 5],
-  weapon: ['laser', 'rocket', 'laser'],
   grid16: [4, 2, 2],
   density: [30, 35, 40],
 });
@@ -68,7 +84,8 @@ export const FIRST_ONSET_MIN = 240; // NOTE 16
 export const OPENING_DENSITY = Object.freeze([
   Object.freeze([1200, 6]), Object.freeze([2400, 14]), Object.freeze([3600, 24])]);
 // NOTE 17: destruction ordinal k (1-based) <= length overrides the drop roll with kind
-// DROP_GUARANTEE[k - 1] (1 mineral, 2 gem); the stream draw is still consumed.
+// DROP_GUARANTEE[k - 1] (1 mineral, 2 gem). Round seven (NOTE 26, 26.3.2): no stream draw is
+// consumed for a guaranteed ordinal any more; ordinal 6 takes the first SALT_DROP draw.
 export const DROP_GUARANTEE = Object.freeze([1, 1, 1, 2, 1]);
 // Section 25.5 (rulings R36.7, R36.8; FB3-TA8 NOTE 19 to NOTE 23): tutorial lane alignment and
 // supply floor for onsets below TUTORIAL_END. Private, as in the reference.
@@ -118,10 +135,28 @@ function makeStream(seed, salt) {
   };
 }
 
-// ------------------------------------------------------------ drops (21.4, R35.12)
+// ------------------------------------------------------------ drops (21.4, R35.12, 26.3)
+// r = draw mod 100: r < DROP_NONE_BELOW none (0, empty since 26.3.1), r < DROP_MINERAL_BELOW
+// mineral (1), else gem (2).
 export function dropKind(r) {
   if (r < DROP_NONE_BELOW) return 0;
   return r < DROP_MINERAL_BELOW ? 1 : 2;
+}
+
+// NOTE 26 (26.3.3): the pickup of tier draw r as [kind, amount]; amount is charge points for a
+// mineral and rockets for a gem (before the CHARGE_CAP / ROCKET_CAP clamp at collection).
+export function dropTier(r) {
+  if (r < DROP_SMALL_BELOW) return [1, MINERAL_SMALL];
+  if (r < DROP_NORMAL_BELOW) return [1, MINERAL_NORMAL];
+  if (r < DROP_LARGE_BELOW) return [1, MINERAL_LARGE];
+  return [2, GEM_AMMO];
+}
+
+// NOTE 26 (26.3.2): guaranteed ordinal k (1-based, k <= DROP_GUARANTEE.length) as [kind, amount]:
+// minerals at NORMAL tier, gems GEM_AMMO. No draw is taken for a guaranteed ordinal.
+export function guaranteedDrop(k) {
+  const kind = DROP_GUARANTEE[k - 1];
+  return [kind, kind === 1 ? MINERAL_NORMAL : GEM_AMMO];
 }
 
 export function dropRolls(seed, n) {
@@ -180,7 +215,7 @@ function baseLoops(seed) {
       }
       lanes.push({length, curve, low});
     }
-    out.push({bpm: BASE.bpm[b], beats: BASE.beats[b], weapon: BASE.weapon[b], lanes});
+    out.push({bpm: BASE.bpm[b], beats: BASE.beats[b], lanes});
   }
   return out;
 }
@@ -334,7 +369,8 @@ export function validateInputs(inputs, mode) {
     if (!Array.isArray(entry) || entry.length !== 4) fail('invalid_input_entry');
     if (!entry.every(Number.isInteger)) fail('wrong_type');
     const [tick, buttons, sx, sy] = entry;
-    if (tick < 0 || tick > tickMax || buttons < 0 || buttons > 15 ||
+    // NOTE 24: the range check precedes invalid_action (35 is out_of_range, 31 invalid_action).
+    if (tick < 0 || tick > tickMax || buttons < 0 || buttons > BUTTONS_MAX ||
         sx < -100 || sx > 100 || sy < -100 || sy > 100 || sx * sx + sy * sy > 10000) fail('out_of_range');
     if ((buttons & 3) === 3) fail('invalid_action');
     if (tick === previous) fail('conflicting_inputs');
@@ -357,8 +393,9 @@ function thrust(sx, sy) {
 // Events (NOTE 4, R35.2):
 //   [t, 1, from, to] hop; [t, 2, why, dir] hop refused (2 boundary, 3 cooldown, 4 charge_low);
 //   [t, 3, code, shots] fire; [t, 4, 3, code] fire refused on cooldown; [t, 5, id, hp_left] hit;
-//   [t, 6, id, code] destroyed; [t, 6, 1] boost refused; [t, 6, 2] fire refused, no ammo;
-//   [t, 5, kind, x, y] pickup collected.
+//   [t, 6, id, code, kind, amount] destroyed (NOTE 27, R38.3: kind 1 mineral / 2 gem and amount
+//   appended by round seven); [t, 6, 1] boost refused; [t, 6, 2] fire refused, no ammo;
+//   [t, 5, kind, x, y] pickup collected (unchanged, kind 1 mineral / 2 gem).
 // Tick order (NOTE 5): loop and lane clamp, input, hop, fire, boost, thrust, drift, move,
 // rockets, distance, collision with dodge and pickup collection, state record, completion.
 export function createGame(seed, mode) {
@@ -387,12 +424,13 @@ export function createGame(seed, mode) {
     }
   };
 
-  const dropNext = makeStream(seed, SALT_DROP);
-  const pickups = new Map(); // asteroid id -> {id, kind, lane, x, y, onset, speed}
+  const drops = makeStream(seed, SALT_DROP);
+  const pickups = new Map(); // asteroid id -> {id, kind, amount, lane, x, y, onset, speed}
 
   let lane = START_LANE, x = 0, y = 0, vx = 0, vy = 0, sx = 0, sy = 0;
   let charge = CHARGE_START, ammo = AMMO_START, boostUntil = 0;
   let hopReady = 0, fireReady = 0, shots = 0, dodged = 0, destroyed = 0, distance = 0;
+  let lastWeapon = 'laser'; // NOTE 28 (26.2.3): weapon id of the most recent accepted fire
   let rockets = []; // [id, lane, x, y, z, weapon]
   let reason = null, terminal = null;
   const events = [];
@@ -414,22 +452,19 @@ export function createGame(seed, mode) {
     return found;
   };
 
-  const damage = (r, amount, t, code) => {
-    const left = Math.max(0, hpLeft.get(r[0]) - amount);
+  const damage = (r, hitPoints, t, code) => {
+    const left = Math.max(0, hpLeft.get(r[0]) - hitPoints);
     hpLeft.set(r[0], left);
     events.push([t, 5, r[0], left]);
     if (left > 0) return;
     dead.add(r[0]);
     destroyed++;
-    events.push([t, 6, r[0], code]);
-    // NOTE 6, R35.12: exactly one drop draw per destruction, in destruction-call order.
-    const rolled = dropKind(dropNext() % 100);
-    // NOTE 17 (section 25.3): ordinal = destroyed (1-based, just incremented) overrides the roll;
-    // the draw above is still consumed so later ordinals keep their stream positions.
-    const kind = destroyed <= DROP_GUARANTEE.length ? DROP_GUARANTEE[destroyed - 1] : rolled;
-    if (kind !== 0) {
-      pickups.set(r[0], {id: r[0], kind, lane: r[2], x: r[9], y: r[10], onset: r[3], speed: NOTE_SPEED[r[4]]});
-    }
+    // NOTE 17 / NOTE 26 (sections 25.3, 26.3): ordinal = destroyed (1-based, just incremented).
+    // Ordinals 1..5 take the guarantee without a draw; from 6 one draw per destruction, in
+    // destruction-call order. Every destruction drops one pickup (26.3.1).
+    const [kind, amount] = destroyed <= DROP_GUARANTEE.length ? guaranteedDrop(destroyed) : dropTier(drops() % 100);
+    events.push([t, 6, r[0], code, kind, amount]); // NOTE 27 (R38.3)
+    pickups.set(r[0], {id: r[0], kind, amount, lane: r[2], x: r[9], y: r[10], onset: r[3], speed: NOTE_SPEED[r[4]]});
   };
 
   const doHop = (t, buttons, laneCount) => {
@@ -447,11 +482,13 @@ export function createGame(seed, mode) {
   };
 
   const doFire = (t, weapon) => {
-    // NOTE 7: cooldown refusal first, then out of ammo.
+    // NOTE 7, NOTE 24: one shared fire cooldown; the cooldown refusal names the selected weapon
+    // and precedes the out-of-ammo refusal. Refused fires leave lastWeapon unchanged (NOTE 28).
     if (t < fireReady) { events.push([t, 4, 3, weapon.code]); return; }
     if (ammo < weapon.ammo_cost) { events.push([t, 6, 2]); return; }
     ammo -= weapon.ammo_cost;
     shots++;
+    lastWeapon = weapon.id;
     events.push([t, 3, weapon.code, shots]);
     fireReady = t + weapon.cooldown_ticks;
     if (weapon.kind !== 'hitscan') { rockets.push([shots, lane, x, y, 0, weapon]); return; }
@@ -513,8 +550,9 @@ export function createGame(seed, mode) {
         const pk = pickups.get(r[0]);
         const dx = x - pk.x, dy = y - pk.y, reach = SHIP_RADIUS + PICKUP_RADIUS;
         if (dx * dx + dy * dy < reach * reach) {
-          if (pk.kind === 1) charge = Math.min(CHARGE_CAP, charge + MINERAL_CHARGE);
-          else ammo = Math.min(ROCKET_CAP, ammo + GEM_AMMO);
+          // NOTE 29 (26.3.3): the pickup grants its own amount, clamped at the cap.
+          if (pk.kind === 1) charge = Math.min(CHARGE_CAP, charge + pk.amount);
+          else ammo = Math.min(ROCKET_CAP, ammo + pk.amount);
           events.push([t, 5, pk.kind, pk.x, pk.y]);
         }
       }
@@ -531,8 +569,10 @@ export function createGame(seed, mode) {
     lane = Math.min(lane, base.lanes.length - 1);
     let buttons = 0;
     if (entry !== null) { buttons = entry[1]; sx = entry[2] + 0; sy = entry[3] + 0; }
+    // NOTE 24 (26.2.2): the weapon of this tick is the player's: rocket while bit4 is set, else laser.
+    const weapon = (buttons & ROCKET_SELECT) ? WEAPONS.rocket : WEAPONS.laser;
     doHop(t, buttons, base.lanes.length);
-    if (buttons & 4) doFire(t, WEAPONS[base.weapon]);
+    if (buttons & 4) doFire(t, weapon);
     if (buttons & 8) doBoost(t);
     doMove(t, L, base);
     doRockets(t);
@@ -573,7 +613,7 @@ export function createGame(seed, mode) {
       return {ammo, boost_until: boostUntil, charge, destroyed, distance, dodged, fire_ready: fireReady,
         hop_ready: hopReady, lane, lane_count: base.lanes.length, loop: L, mode, position: [x, y], processed,
         ruleset_id: RULESET_ID, score: distance, seed, status: reason === null ? 'running' : 'ended',
-        terminal_reason: reason, terminal_tick: terminal, velocity: [vx, vy], weapon: base.weapon};
+        terminal_reason: reason, terminal_tick: terminal, velocity: [vx, vy], weapon: lastWeapon}; // NOTE 28
     },
     // View for the next tick p (NOTE 6, NOTE 11).
     view() {
