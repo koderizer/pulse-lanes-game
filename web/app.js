@@ -3,7 +3,7 @@
 // New runs play pl-v3 (spec 21, ruling R35) in the lobby mode; the pl-v2 module stays for the
 // lobby backdrop, the shared tunnel geometry and a legacy (v1 challenge) pl-v2 run path.
 import {createGame, TICKS_PER_SECOND, MAX_TICKS, WEAPONS} from '../src/sim/space_racer.js';
-import {createGame as createGameV3, loopCourse, loopStart, BEAM_TIERS, MINERAL_NORMAL, MODES, MODE_TICKS, validateInputs as validateInputsV3} from '../src/sim/space_racer_v3.js';
+import {createGame as createGameV3, loopCourse, loopStart, BEAM_R_MAX, BEAM_TIERS, MINERAL_NORMAL, MODES, MODE_TICKS, validateInputs as validateInputsV3} from '../src/sim/space_racer_v3.js';
 import {newSave, importSave, exportSave, STORAGE_KEY} from '../src/state/pilot_state.js';
 import {quantizeStick, keyboardStick, MAX_RADIUS_PX, CAPTURE_RADIUS_PX} from '../src/input/controls.js';
 import {digest} from './digest.js';
@@ -13,7 +13,7 @@ import {Sfx} from './sfx.js';
 import {renderHud, buildControls, formatKm, MODE_LABELS, paintRocketLatch} from './hud.js';
 import {createPause} from './pause.js';
 import {applySetting, defaultSettings, lastResultText, retryEnabled, SETTING_CONTROLS} from './lobby_model.js';
-import {createRenderer, LANE_SPACING, MU} from './render.js';
+import {createRenderer, createTrack, fovyFor, beatCues, LANE_SPACING, MU} from './render.js';
 import {createRenderer2d, projectCross, shipAnchor} from './render2d.js';
 import {createGameOver, drawShipPlan} from './gameover.js';
 import {SHIPS, SHIP_KEY, shipIdOrDefault, outlineBounds} from './ships.js';
@@ -399,6 +399,7 @@ function start(nextSeed) {
   music.reset(); voice.setMap(scoreMap);
   beginSession(); music.gesture(); persist();
   renderer.setCourse(map, course);
+  if (rendererKind === 'webgl2') shipMirror.setCourse(map); // R44.2: same reset as render.js
   runShip = shipId; renderer.setShip?.(runShip);
   runSettings = {...settingsNow()};
   applySettingsToOutputs();
@@ -613,52 +614,251 @@ function pickupTicksLeft(e, p) {
   return row ? row[3] - p : NaN;
 }
 
-// ------------------------------------------------------------------ laser ray (spec 27.4.2, R41.1, restyled by R43)
+// ------------------------------------------------------------------ WebGL ship anchor mirror (R44.2)
+// render.js is frozen and publishes no ship screen point, so the overlay keeps an app-side copy of
+// its ship transform (lane smoothing, chase camera, projection; render.js lines 620 to 890 read as
+// the spec). frame() advances it once per renderer.draw call with the same rows (same real clock),
+// and it is reset with the same setCourse. The track model, fovyFor and beatCues are render.js
+// exports, so curve and cue math is shared, not copied; every duplicated constant cites its
+// render.js line. docs/pm/runs/FB3-WEB8/scratch/mirror_check.mjs evaluates the block between the
+// markers as is (no DOM) and checks it against render.js itself.
+// SHIP-MIRROR-BEGIN
+function createShipMirror() {
+  const clamp = (x, a, b) => Math.min(b, Math.max(a, x)); // render.js:58
+  const lerp = (a, b, t) => a + (b - a) * t; // render.js:59
+  const normalize = v => { const l = Math.hypot(v[0], v[1], v[2]) || 1; v[0] /= l; v[1] /= l; v[2] /= l; return v; }; // render.js:226
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; // render.js:227
+  let track = createTrack(null); // render.js:617
+  let shipLaneF = 1, camLaneF = 1, camLaneVel = 0, shake = 0, effectTime = 0, lastNow = null; // render.js:624
+  let lastView = null, lastProcessed = -1; // render.js:622
+  let lastLane = null, lastFireReady = 0, lastLocked = false, endHandled = false; // render.js:625
+  const cues = {surge: 0, bob: 0, fovKick: 0, pulse: 0}; // render.js:712
+  const cA = [0, 0, 0], cB = [0, 0, 0], cBack = [0, 0, 0], cAhead = [0, 0, 0], cP = [0, 0, 0];
+  // This frame's lookAt basis and focal terms, and the ship pose, written by advance().
+  const cam = {ok: false, eye: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1], fx: 1, fy: 1};
+  const pose = {alive: false, laneF: 1, sShip: 0, sx: 0, sy: 0};
+
+  // render.js:1019 setCourse: new track, resetRun (render.js:632 to 636), lanes back to 1. lastNow and
+  // effectTime are not reset there either. camLaneVel is rederived every draw (render.js:793).
+  function setCourse(map) {
+    track = createTrack(map);
+    lastView = null; lastProcessed = -1; shake = 0; // render.js:633, 634
+    lastLane = null; lastFireReady = 0; lastLocked = false; endHandled = false; // render.js:635
+    shipLaneF = camLaneF = 1; camLaneVel = 0; // render.js:1019
+  }
+
+  // The camera shake inputs of render.js syncView (render.js:650 to 708); the rest of it (asteroid,
+  // rocket and beam bookkeeping) does not move the camera or the ship.
+  function syncShake(view, p, prev, curr, trail, reduced) {
+    if (!view || view === lastView) return; // render.js:651
+    lastView = view; // render.js:652
+    const rows = Array.isArray(trail) && trail.length ? trail : [{p, state: curr, view}]; // render.js:673
+    if (!(curr && prev && curr.processed !== lastProcessed)) return; // render.js:679
+    for (const entry of rows) { // render.js:682
+      const s = entry?.state; // render.js:683
+      if (!s || entry.p <= lastProcessed || !(s.fire_ready > lastFireReady)) continue; // render.js:684
+      lastFireReady = s.fire_ready; // render.js:685
+      const weapon = track.loops[track.loopAtTick(Math.max(0, entry.p - 1))]?.weapon ?? s.weapon; // render.js:686, 687
+      if (!reduced) shake = Math.max(shake, weapon === 'laser' ? 0.05 : 0.12); // render.js:699
+    }
+    lastFireReady = Math.max(lastFireReady, curr.fire_ready); // render.js:701
+    lastProcessed = curr.processed; // render.js:702
+    if (lastLane !== null && curr.lane !== lastLane && !reduced) shake = Math.max(shake, 0.12); // render.js:703
+    lastLane = curr.lane; // render.js:704
+    const locked = curr.locked_until > curr.processed; // render.js:705
+    if (locked && !lastLocked && !reduced) shake = Math.max(shake, 0.3); // render.js:706
+    lastLocked = locked; // render.js:707
+  }
+
+  // One render.js draw (render.js:748 to 822) up to the camera; `aspect` is the WebGL canvas w / h.
+  function advance(frame, reduced, aspect) {
+    const now = Number.isFinite(frame.now) ? frame.now : performance.now(); // render.js:750
+    const dtReal = lastNow === null ? 0 : clamp((now - lastNow) / 1000, 0, 0.1); // render.js:751
+    lastNow = now; // render.js:752
+    const dt = frame.paused ? 0 : dtReal; // render.js:753
+    effectTime += dt; // render.js:754
+    let T, sx = 0, sy = 0, vx = 0, lane = 1, alive = true; // render.js:760
+    if (frame.curr) {
+      const curr = frame.curr, prev = frame.prev ?? curr; // render.js:762
+      const a = clamp(Number(frame.alpha) || 0, 0, 1); // render.js:763
+      T = curr.processed - 2 + a; // render.js:764
+      sx = lerp(prev.position[0], curr.position[0], a) / MU; // render.js:765
+      sy = lerp(prev.position[1], curr.position[1], a) / MU; // render.js:766
+      vx = lerp(prev.velocity[0], curr.velocity[0], a); // render.js:767
+      lane = curr.lane; // render.js:768
+      syncShake(frame.view, curr.processed, prev, curr, frame.trail, reduced); // render.js:769
+      if (curr.status === 'ended' && !endHandled) { // render.js:770, 771
+        endHandled = true;
+        if (curr.terminal_reason === 'collision' && !reduced) shake = 1; // render.js:772, 775
+      }
+      if (curr.status === 'ended' && curr.terminal_reason === 'collision') alive = false; // render.js:780
+    } else {
+      T = (Number(frame.cruise) || 0) * 60; // render.js:782
+      sx = Math.sin(T / 140) * 22; sy = Math.cos(T / 190) * 14 - 6; // render.js:784
+    }
+    const sShip = track.sAt(T); // render.js:786
+    const kShip = 1 - Math.exp(-dtReal / 0.07), kCam = 1 - Math.exp(-dtReal / 0.15); // render.js:789
+    shipLaneF += (lane - shipLaneF) * (dtReal > 0 ? kShip : 1); // render.js:790
+    const before = camLaneF; // render.js:791
+    camLaneF += (lane - camLaneF) * (dtReal > 0 ? kCam : 1); // render.js:792
+    camLaneVel = dtReal > 0 ? (camLaneF - before) / dtReal : 0; // render.js:793
+    beatCues(track.beatsAt(T), reduced, cues); // render.js:797
+    const camBack = 38 - cues.surge; // render.js:798; CAM_BACK = 38 (render.js:22)
+    track.centre(camLaneF, sShip - camBack, cBack); // render.js:802
+    track.centre(camLaneF, sShip + 90, cAhead); // render.js:803; CAM_AHEAD = 90 (render.js:22)
+    shake *= Math.exp(-dt * 4.5); // render.js:804
+    const jx = reduced ? 0 : shake * 3.2 * Math.sin(effectTime * 41); // render.js:805
+    const jy = reduced ? 0 : shake * 3.2 * Math.sin(effectTime * 37 + 1.3); // render.js:805
+    const eye = cam.eye;
+    eye[0] = cBack[0] + sx * 0.72 + jx; // render.js:806
+    eye[1] = cBack[1] + sy * 0.72 + 15 + jy + cues.bob; // render.js:806, 799; CAM_UP = 15 (render.js:22)
+    eye[2] = camBack; // render.js:806
+    const shipY = Math.max(track.centre(shipLaneF, sShip, cA)[1], track.centre(lane, sShip, cB)[1]) + sy; // render.js:809
+    eye[1] = Math.max(eye[1], shipY + 6); // render.js:810; CAM_MIN_ABOVE = 6 (render.js:26)
+    const target = [cAhead[0] + sx * 0.45 + jx * 0.5, cAhead[1] + sy * 0.45 + 5 + jy * 0.5, -90]; // render.js:811
+    const roll = reduced ? 0 : clamp(camLaneVel * 0.045 + vx / 3750 * 0.1, -0.3, 0.3); // render.js:812
+    const [fx, fy, fz] = normalize([target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]]); // render.js:813
+    // render.js:814 up = row 1 of axisAngle(fwd, roll) (render.js:255 to 258).
+    const c = Math.cos(roll), s = Math.sin(roll), t = 1 - c;
+    const up = [t * fx * fy - s * fz, t * fy * fy + c, t * fy * fz + s * fx];
+    // render.js:819 lookAt basis (render.js:230, 231).
+    cam.z = normalize([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]);
+    cam.x = normalize(cross(up, cam.z)); cam.y = cross(cam.z, cam.x);
+    // render.js:816, 818 fovy and perspective focal terms (render.js:221, 223).
+    const f = 1 / Math.tan((fovyFor(aspect) + cues.fovKick) / 2);
+    cam.fx = f / aspect; cam.fy = f; cam.ok = true;
+    pose.alive = alive; pose.laneF = shipLaneF; pose.sShip = sShip; pose.sx = sx; pose.sy = sy;
+  }
+
+  // World point -> overlay pixels: lookAt then perspective (render.js:220 to 236, 818 to 820) and
+  // the viewport (0, 0, w, h) with y down. Null behind the eye (clip w = -view z, render.js:223).
+  function project(px, py, pz, w, h) {
+    const {eye, x, y, z} = cam, dx = px - eye[0], dy = py - eye[1], dz = pz - eye[2];
+    const depth = -(z[0] * dx + z[1] * dy + z[2] * dz);
+    if (!(depth > 1e-6)) return null;
+    const nx = cam.fx * (x[0] * dx + x[1] * dy + x[2] * dz) / depth;
+    const ny = cam.fy * (y[0] * dx + y[1] * dy + y[2] * dz) / depth;
+    return [(nx + 1) * 0.5 * w, (1 - ny) * 0.5 * h];
+  }
+  // The point d world units ahead of the ship on its smoothed lane centreline at the ship's lateral
+  // offset; d = 0 is shipPos (render.js:879 to 881), d > 0 the aim column as render.js:968 draws it.
+  function aimPoint(d, w, h) {
+    if (!cam.ok || !pose.alive) return null;
+    track.centre(pose.laneF, pose.sShip + d, cP);
+    return project(cP[0] + pose.sx, cP[1] + pose.sy, -d, w, h);
+  }
+
+  return {setCourse, advance, aimPoint, shipPoint: (w, h) => aimPoint(0, w, h),
+    lanes: () => ({shipLaneF, camLaneF, camLaneVel})};
+}
+// SHIP-MIRROR-END
+const shipMirror = createShipMirror();
+
+// ------------------------------------------------------------------ one laser visual under WebGL (R44.1)
+// render.js (frozen) draws its own short laser stub, muzzle flash and fire shake on every fire_ready
+// rise it reads in the trail rows (render.js lines 680 to 699). In a pl-v3 run the overlay ray is the
+// laser, so the WebGL renderer gets a copy of the trail whose state views pin fire_ready to 0: no
+// rise, no stub. Every other field and reference is the original (p, view with its asteroids and
+// rockets, and every other state field), so rocket flight, hit flashes, explosions and the hop
+// shake are unchanged. Trail rows are immutable, so each masked row is built once. A pl-v2 run
+// keeps its rows: the stub is its only laser visual and the overlay draws no ray there.
+const firelessRows = new WeakMap();
+function firelessRow(row) {
+  let out = firelessRows.get(row);
+  if (!out) { out = {...row, state: row.state && {...row.state, fire_ready: 0}}; firelessRows.set(row, out); }
+  return out;
+}
+function webglRows(rows) {
+  if (runRuleset !== 'pl-v3' || !Array.isArray(rows.trail)) return rows;
+  return {...rows, trail: rows.trail.map(firelessRow)};
+}
+
+// ------------------------------------------------------------------ laser ray (spec 27.4.2, R41.1, R43, R44)
 // Drawn on the pickup overlay before the pickups, only while the run is active and the sim reports
-// an open beam (state().beam_hold === 1). R43 (owner playtest): the original 2d renderer's laser
-// look (web/render2d.js ship laser, '#ff4d6a'), stretched to the live beam reach. BEAM_SEGMENTS
-// line segments run from the ship (projectCross at z = 0, no world nose lift) to the reach point
-// along the aim column; each segment's alpha echoes the BEAM_TIERS damage decay.
+// an open beam (state().beam_hold === 1); the only laser visual of a pl-v3 run (R44.1). R43: the
+// original laser look (web/render2d.js ship laser, '#ff4d6a') stretched to the live beam reach,
+// BEAM_SEGMENTS strokes from the ship along the aim column, each segment's alpha echoing the
+// BEAM_TIERS damage decay.
 const BEAM_SEGMENTS = 12;
 // Pinned red family (R43.2): core line + glow pass, matching the original laser stroke colour.
 const BEAM_CORE = '#ff4d6a';
 const BEAM_GLOW = 'rgba(255,77,106,0.35)';
 // Depth alphas by BEAM_TIERS band (near full brightness; far fades like the damage does).
 const BEAM_ALPHAS = Object.freeze([1, 0.7, 0.4]);
+// Tip spark alpha of a just-opened beam; it rises to 1 as the reach charges up to BEAM_R_MAX.
+const SPARK_MIN_ALPHA = 0.3;
 function beamBand(z) {
   const i = BEAM_TIERS.findIndex(([dMax]) => z <= dMax);
   return Math.min(BEAM_ALPHAS.length - 1, i < 0 ? BEAM_ALPHAS.length - 1 : i);
 }
 
+// The ray polyline in overlay pixels, base first (R44.2 anchor contract): the base is the
+// renderer's own ship position, and the other points follow that renderer's view of the aim column.
+function beamPoints(w, h, reach, X, Y) {
+  const depth = i => i / BEAM_SEGMENTS * reach / MU;
+  const welded2d = rendererKind === 'fallback2d' && shipAnchor[2] === 1;
+  if (!welded2d && rendererKind === 'webgl2') {
+    // WebGL: every point through the mirrored render.js camera, so the base sits on the ship mesh
+    // and the ray runs down the tube with it.
+    const pts = [];
+    for (let i = 0; i <= BEAM_SEGMENTS; i++) {
+      const p = shipMirror.aimPoint(depth(i), w, h);
+      if (!p) break;
+      pts.push(p);
+    }
+    if (pts.length === BEAM_SEGMENTS + 1) return pts;
+  }
+  // Cross-section pinhole (the pickup convention). Alone, it is the last-resort fallback.
+  const pts = [];
+  for (let i = 0; i <= BEAM_SEGMENTS; i++) pts.push(projectCross(w, h, depth(i), X, Y));
+  if (welded2d) {
+    // 2D: shipAnchor is where render2d drew the ship this frame (R43.3). Its hop camera lag and
+    // shake shift its whole cross-section (render2d.js:160), so the ray moves by the same offset:
+    // the base lands on the anchor and the ray stays straight instead of kinking after the base.
+    const dx = shipAnchor[0] - pts[0][0], dy = shipAnchor[1] - pts[0][1];
+    for (const p of pts) { p[0] += dx; p[1] += dy; }
+    pts[0] = [shipAnchor[0], shipAnchor[1]];
+  }
+  return pts;
+}
+
 function drawBeam(ctx, w, h, dpr) {
   const s = currState;
   if (!(running && s?.status === 'running' && s.beam_hold === 1)) return;
-  const reach = Number(s.beam_reach);
-  if (!(reach > 0)) return;
-  // Aim point (interpolated like the renderers' ship). The beam row is the ship's own lane, so the
-  // lane term of the pickup form x / MU + (lane - shipLane) * LANE_SPACING is zero here.
-  const a = Math.min(1, Math.max(0, accumulator / TICK_MS)), from = prevState?.position ?? s.position;
+  if (!(Number(s.beam_reach) > 0)) return;
+  const a = Math.min(1, Math.max(0, accumulator / TICK_MS));
+  // A release already lifted but not yet sent (R41.3: it goes out on the next tick, which closes the
+  // beam) fades the ray toward 0 at that tick, so the close does not pop from full brightness.
+  const fade = fireHeld === 0 && lastSent[2] === 1 ? 1 - a : 1;
+  if (fade < 0.02) return;
+  // Reach and aim point are interpolated like the renderers' ship. The reach grows from 0 on the
+  // opening tick, so the ray extends out of the ship instead of stepping in a tick at a time.
+  const reachFrom = prevState?.beam_hold === 1 ? Number(prevState.beam_reach) || 0 : 0;
+  const reach = reachFrom + (Number(s.beam_reach) - reachFrom) * a;
+  const from = prevState?.position ?? s.position;
   const X = (from[0] + (s.position[0] - from[0]) * a) / MU;
   const Y = (from[1] + (s.position[1] - from[1]) * a) / MU;
-  const pts = [];
-  for (let i = 0; i <= BEAM_SEGMENTS; i++) {
-    const f = i / BEAM_SEGMENTS;
-    pts.push(projectCross(w, h, f * reach / MU, X, Y));
-  }
-  // R43.3 anchor: weld the base to the sprite. The 2D renderer publishes the ship's exact screen
-  // position (shipAnchor); it owns the laneF camera lag the overlay cannot recompute. Fallback
-  // (WebGL renderer, render2d never drew): projectCross base, same convention as the pickups.
-  if (shipAnchor[2] === 1) pts[0] = [shipAnchor[0], shipAnchor[1]];
+  const pts = beamPoints(w, h, reach, X, Y);
   const tip = pts[BEAM_SEGMENTS];
-  ctx.globalAlpha = 1; ctx.lineCap = 'round';
-  ctx.strokeStyle = BEAM_GLOW; ctx.lineWidth = 7 * dpr; // glow pass under the core (R43.2)
-  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); ctx.lineTo(tip[0], tip[1]); ctx.stroke();
-  ctx.strokeStyle = BEAM_CORE; ctx.lineWidth = 3 * dpr; // core, 12 per-segment strokes
+  ctx.lineJoin = 'round';
+  // Glow (R43.2): one pass along the core's own polyline, so it is a halo around the core.
+  ctx.globalAlpha = fade; ctx.lineCap = 'round';
+  ctx.strokeStyle = BEAM_GLOW; ctx.lineWidth = 7 * dpr;
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i <= BEAM_SEGMENTS; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.stroke();
+  // Core (R43.2): one stroke per segment. Opaque segments keep round caps (overlapping caps are
+  // invisible at alpha 1); translucent ones use butt caps, so neighbours abut instead of blending a
+  // bright bead into every joint.
+  ctx.strokeStyle = BEAM_CORE; ctx.lineWidth = 3 * dpr;
   for (let i = 0; i < BEAM_SEGMENTS; i++) {
-    ctx.globalAlpha = BEAM_ALPHAS[beamBand((i + 0.5) / BEAM_SEGMENTS * reach)];
+    const alpha = fade * BEAM_ALPHAS[beamBand((i + 0.5) / BEAM_SEGMENTS * reach)];
+    ctx.globalAlpha = alpha; ctx.lineCap = alpha < 1 ? 'butt' : 'round';
     ctx.beginPath(); ctx.moveTo(pts[i][0], pts[i][1]); ctx.lineTo(pts[i + 1][0], pts[i + 1][1]); ctx.stroke();
   }
-  ctx.globalAlpha = 1; ctx.fillStyle = BEAM_CORE; // tip spark at the live reach end
+  // Tip spark at the live reach end; it brightens with charge, so a held beam visibly charges.
+  ctx.globalAlpha = fade * (SPARK_MIN_ALPHA + (1 - SPARK_MIN_ALPHA) * Math.min(1, reach / BEAM_R_MAX));
+  ctx.fillStyle = BEAM_CORE;
   ctx.beginPath(); ctx.arc(tip[0], tip[1], 3 * dpr, 0, Math.PI * 2); ctx.fill();
   ctx.globalAlpha = 1;
 }
@@ -722,12 +922,20 @@ function frame(timestamp) {
   const rows = currState
     ? {prev: prevState, curr: currState, alpha: ended ? 1 : accumulator / TICK_MS, view, trail, paused: pause.isPaused() || !running, now: timestamp}
     : {cruise: timestamp / 1000, now: timestamp};
-  try { renderer.draw(rows); }
+  const drawRows = rendererKind === 'webgl2' ? webglRows(rows) : rows; // R44.1
+  try { renderer.draw(drawRows); }
   catch (err) {
     if (rendererKind === 'webgl2') { console.warn('WebGL2 draw failed, switching to the 2D fallback:', err?.message ?? err); useFallback('lost'); }
   }
-  // Spec 26.3.6: pickups on the overlay, after the game canvas frame (either renderer kind).
-  try { drawPickups(); }
+  // Spec 26.3.6: pickups on the overlay, after the game canvas frame (either renderer kind). R44.2:
+  // under WebGL the ship mirror first takes the same rows the renderer just drew.
+  try {
+    if (rendererKind === 'webgl2') {
+      const glCanvas = $('canvas');
+      shipMirror.advance(drawRows, Boolean(settingsNow().reduced_motion), glCanvas.width / glCanvas.height);
+    }
+    drawPickups();
+  }
   catch (err) { if (!pickupWarned) { pickupWarned = true; console.warn('Pickup overlay draw failed:', err?.message ?? err); } }
   // W4c R-1: HUD DOM writes only when a tick produced a new state row, not on every frame.
   if (currState && currState !== hudState) { renderHud(document, currState, scoreMap); hudState = currState; }
@@ -879,6 +1087,7 @@ initRenderer();
 // Lobby backdrop: the course of the shown seed, cruising without asteroids (presentation only).
 map = scoreMap = createGame(seed).map();
 renderer.setCourse(map, []);
+if (rendererKind === 'webgl2') shipMirror.setCourse(map); // R44.2: the backdrop course too
 applySettingsToOutputs();
 openLobby();
 requestAnimationFrame(frame);

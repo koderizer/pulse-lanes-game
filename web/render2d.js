@@ -234,9 +234,13 @@ export function createRenderer2d(opts = {}) {
     // start exactly on the sprite (the overlay cannot recompute the renderer's laneF camera lag).
     shipAnchor[0] = shx; shipAnchor[1] = shy; shipAnchor[2] = alive ? 1 : 0;
     if (beam > 0 && alive) {
-      const far = project(240, c0[0] + sx, c0[1] + sy);
-      ctx.globalAlpha = beam; ctx.strokeStyle = '#ff4d6a'; ctx.lineWidth = 3 * dpr;
-      ctx.beginPath(); ctx.moveTo(shx, shy); ctx.lineTo(far[0], far[1]); ctx.stroke();
+      // R44.1: while the sim reports an open beam, app.js's overlay ray is the one laser visual, so
+      // the stub is not drawn; beam keeps decaying, so a release restores the legacy look.
+      if (curr?.beam_hold !== 1) {
+        const far = project(240, c0[0] + sx, c0[1] + sy);
+        ctx.globalAlpha = beam; ctx.strokeStyle = '#ff4d6a'; ctx.lineWidth = 3 * dpr;
+        ctx.beginPath(); ctx.moveTo(shx, shy); ctx.lineTo(far[0], far[1]); ctx.stroke();
+      }
       beam = Math.max(0, beam - dt * 7);
     }
     if (alive) {
