@@ -14,7 +14,7 @@ import {renderHud, buildControls, formatKm, MODE_LABELS, paintRocketLatch} from 
 import {createPause} from './pause.js';
 import {applySetting, defaultSettings, lastResultText, retryEnabled, SETTING_CONTROLS} from './lobby_model.js';
 import {createRenderer, LANE_SPACING, MU} from './render.js';
-import {createRenderer2d, projectCross} from './render2d.js';
+import {createRenderer2d, projectCross, shipAnchor} from './render2d.js';
 import {createGameOver, drawShipPlan} from './gameover.js';
 import {SHIPS, SHIP_KEY, shipIdOrDefault, outlineBounds} from './ships.js';
 import {applyChallenge, createScanOverlay} from './challenge.js';
@@ -641,17 +641,14 @@ function drawBeam(ctx, w, h, dpr) {
   const X = (from[0] + (s.position[0] - from[0]) * a) / MU;
   const Y = (from[1] + (s.position[1] - from[1]) * a) / MU;
   const pts = [];
-  // R43.3 anchor, corrected after live QA: the overlay shares the game canvas frame, whose centre
-  // carries the curve term (render2d draw(): cx = w/2 + (lane - laneF) * w * 0.6). laneF is the
-  // frame's smoothed lane, unknown to the overlay; the midpoint 0.5 keeps the base error bounded by
-  // +/- 0.3 w between keyframes and exact at lane rest. Without this term the beam detaches while
-  // steering (the float the owner saw).
-  const cxOff = (s.lane - 0.5) * w * 0.6;
   for (let i = 0; i <= BEAM_SEGMENTS; i++) {
     const f = i / BEAM_SEGMENTS;
-    const [px, py] = projectCross(w, h, f * reach / MU, X, Y); // already carries w/2 frame centre
-    pts.push([px + cxOff, py]); // R43.3: z = 0 base sits on the ship (curve term added)
+    pts.push(projectCross(w, h, f * reach / MU, X, Y));
   }
+  // R43.3 anchor: weld the base to the sprite. The 2D renderer publishes the ship's exact screen
+  // position (shipAnchor); it owns the laneF camera lag the overlay cannot recompute. Fallback
+  // (WebGL renderer, render2d never drew): projectCross base, same convention as the pickups.
+  if (shipAnchor[2] === 1) pts[0] = [shipAnchor[0], shipAnchor[1]];
   const tip = pts[BEAM_SEGMENTS];
   ctx.globalAlpha = 1; ctx.lineCap = 'round';
   ctx.strokeStyle = BEAM_GLOW; ctx.lineWidth = 7 * dpr; // glow pass under the core (R43.2)

@@ -27,6 +27,10 @@ export function projectCross(w, h, d, X, Y) {
   return [w / 2 + X * k * unit, h * 0.54 - Y * k * unit, k];
 }
 
+// R43.3: [shx, shy, alive] - the ship's last drawn canvas-pixel position, written by draw().
+// The app's pickup overlay uses it as the laser ray base so the beam is welded to the sprite.
+export const shipAnchor = [0, 0, 0];
+
 export function createRenderer2d(opts = {}) {
   const canvas = opts.canvas;
   const ctx = canvas?.getContext?.('2d');
@@ -226,6 +230,9 @@ export function createRenderer2d(opts = {}) {
 
     // ship
     const shx = cx + sx * unit, shy = cy - sy * unit;
+    // R43.3 (live QA): publish the ship's screen anchor so the pickup-overlay laser ray can
+    // start exactly on the sprite (the overlay cannot recompute the renderer's laneF camera lag).
+    shipAnchor[0] = shx; shipAnchor[1] = shy; shipAnchor[2] = alive ? 1 : 0;
     if (beam > 0 && alive) {
       const far = project(240, c0[0] + sx, c0[1] + sy);
       ctx.globalAlpha = beam; ctx.strokeStyle = '#ff4d6a'; ctx.lineWidth = 3 * dpr;
