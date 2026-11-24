@@ -2,7 +2,8 @@
 // rulings R35 and R35.14) with the round-six onboarding tuning (section 25, ruling R36) and the
 // round-seven player weapon select and drop economy (sections 26.2 and 26.3, ruling R38; FB3-TA9
 // NOTE 24 to NOTE 29). Pure ES module: integer math only, no I/O, no wall clock and no
-// Math.random. Every random draw comes from a seeded stream of the run seed.
+// Math.random. Every random draw comes from a seeded stream of the run seed. Round eight adds
+// the laser energy budget per ship model (ruling R45.2; FB3-TA13 NOTE 41 to NOTE 45).
 //
 // Isolation (R35.1): src/sim/space_racer.js is never edited and its private helpers are not
 // read. Everything pl-v3 needs from pl-v2 (mix32, the section 3 stream, the section 4.3 map
@@ -68,6 +69,23 @@ function beamReach(t0, t) { return Math.min(BEAM_R_MAX, BEAM_V_EXT * (t - t0 + 1
 function beamDamage(d) {
   for (const [dMax, damage] of BEAM_TIERS) if (d <= dMax) return damage;
   return 1;
+}
+
+// NOTE 41 (ruling R45.2, owner playtest): laser energy. Each ship model has its own capacity; the
+// map lives here because the sim never imports web ship data. A game starts full, an open beam
+// drains ENERGY_DRAIN per tick and every tick without an open beam refills ENERGY_REGEN, always
+// an integer clamped to [0, capacity]. ENERGY_START is the same map: a game starts at the
+// capacity of its ship. The numbers are PM defaults under owner veto (R42 pattern).
+export const ENERGY_CAPACITY = Object.freeze({dart: 100, delta: 120, wraith: 90, hauler: 150, lance: 80});
+export const ENERGY_START = ENERGY_CAPACITY;
+export const ENERGY_DRAIN = 2;
+export const ENERGY_REGEN = 8;
+// NOTE 42 (R45.2): the createGame ship id selects a capacity only when it is a string naming an
+// own key of ENERGY_CAPACITY; anything else (absent, null, non-string, unknown, inherited names
+// such as 'toString') plays as 'dart', so a bad id can never fail or change any other rule.
+function energyCapacity(shipId) {
+  const known = typeof shipId === 'string' && Object.prototype.hasOwnProperty.call(ENERGY_CAPACITY, shipId);
+  return ENERGY_CAPACITY[known ? shipId : 'dart'];
 }
 
 // ------------------------------------------------------------ pl-v2 constants (section 2), private
@@ -411,13 +429,16 @@ function thrust(sx, sy) {
 //   [t, 3, code, shots] fire; [t, 4, 3, code] fire refused on cooldown; [t, 5, id, hp_left] hit;
 //   [t, 6, id, code, kind, amount] destroyed (NOTE 27, R38.3: kind 1 mineral / 2 gem and amount
 //   appended by round seven); [t, 6, 1] boost refused; [t, 6, 2] fire refused, no ammo;
+//   [t, 6, 3] laser refused, energy empty (R45.2);
 //   [t, 5, kind, x, y] pickup collected (unchanged, kind 1 mineral / 2 gem).
 // Tick order (NOTE 5): loop and lane clamp, input, hop, fire, boost, thrust, drift, move,
 // rockets, distance, collision with dodge and pickup collection, state record, completion.
-export function createGame(seed, mode) {
+// The optional shipId only picks the laser energy capacity (NOTE 42); it never fails.
+export function createGame(seed, mode, shipId) {
   if (!isSeed(seed)) fail('out_of_range'); // NOTE 11: seed first
   if (!MODES.includes(mode)) fail('invalid_mode');
   const limit = MODE_TICKS[mode];
+  const capacity = energyCapacity(shipId);
   const bases = baseLoops(seed);
 
   // Lazily built course, one entry per absolute loop.
@@ -448,6 +469,7 @@ export function createGame(seed, mode) {
   let hopReady = 0, fireReady = 0, shots = 0, dodged = 0, destroyed = 0, distance = 0;
   let lastWeapon = 'laser'; // NOTE 28 (26.2.3): weapon id of the most recent accepted fire
   let fireLevel = 0, beam = null; // NOTE 36 (27.1.1, 27.2.2): fire level state; open beam {t0, reach, hit} or null
+  let energy = capacity; // NOTE 41: starts full
   let rockets = []; // [id, lane, x, y, z, weapon]
   let reason = null, terminal = null;
   const events = [];
@@ -600,8 +622,11 @@ export function createGame(seed, mode) {
     if (entry !== null) fireLevel = (buttons & 4) ? 1 : 0;
     if (fireLevel === 0) beam = null;
     if (fireLevel === 1 && wasLevel === 0) {
+      // NOTE 43 (R45.2): energy is the third refusal, after cooldown and ammo. It guards the
+      // beam only, so a rocket edge never reads energy.
       if (t < fireReady) { events.push([t, 4, 3, weapon.code]); }
       else if (ammo < weapon.ammo_cost) { events.push([t, 6, 2]); }
+      else if (weapon.id === 'laser' && energy === 0) { events.push([t, 6, 3]); }
       else {
         ammo -= weapon.ammo_cost;
         shots++;
@@ -616,12 +641,21 @@ export function createGame(seed, mode) {
     // beam step (NOTE 38, 27.2.2 to 27.2.6): every open tick, reach grows; each live rock with
     // 0 < z <= reach in the aim column not yet hit by this beam is hit once, (z asc, id asc),
     // for beamDamage(z) hit points (drop and guarantee logic unchanged via damage()).
+    // NOTE 44 (R45.2): energy moves after the hits, once per tick. An open beam (its opening
+    // tick included) drains; on the tick the drain empties it the beam closes like a release
+    // (this tick's hits stay, no event) while the level stays held, so only a new rising edge
+    // can open the next beam. A tick with no open beam (released, refused, rocket or a held
+    // level after the close) refills.
     if (beam) {
       beam.reach = beamReach(beam.t0, t);
       const due = targetsIn(lane, t, x, y, BEAM_HALF_WIDTH)
         .filter(c => c.z > 0 && c.z <= beam.reach && !beam.hit.has(c.r[0]));
       due.sort((a, c) => a.z - c.z || a.r[0] - c.r[0]);
       for (const c of due) { beam.hit.add(c.r[0]); damage(c.r, beamDamage(c.z), t, WEAPONS.laser.code); }
+      energy = Math.max(0, energy - ENERGY_DRAIN);
+      if (energy === 0) beam = null;
+    } else {
+      energy = Math.min(capacity, energy + ENERGY_REGEN);
     }
     if (buttons & 8) doBoost(t);
     doMove(t, L, base);
@@ -656,11 +690,12 @@ export function createGame(seed, mode) {
       return game.state();
     },
     // NOTE 11: exact key set; loop is the absolute L of the next tick (clamped in timed modes).
+    // NOTE 45 (R45.2): energy after the last processed tick is the one key R45 adds.
     state() {
       const processed = states.length;
       const L = loopAt(limit === null ? processed : Math.min(processed, limit - 1));
       const base = bases[L % BASE_LOOPS];
-      return {ammo, boost_until: boostUntil, charge, destroyed, distance, dodged, fire_ready: fireReady,
+      return {ammo, boost_until: boostUntil, charge, destroyed, distance, dodged, energy, fire_ready: fireReady,
         hop_ready: hopReady, lane, lane_count: base.lanes.length, loop: L, mode, position: [x, y], processed,
         ruleset_id: RULESET_ID, score: distance, seed, status: reason === null ? 'running' : 'ended',
         terminal_reason: reason, terminal_tick: terminal, velocity: [vx, vy], weapon: lastWeapon,

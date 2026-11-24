@@ -383,7 +383,7 @@ function start(nextSeed) {
   runRuleset = challenge?.ruleset === 'pl-v2' && challenge.seed === nextSeed ? 'pl-v2' : 'pl-v3';
   if (runRuleset === 'pl-v3') {
     runMode = modeId;
-    game = createGameV3(nextSeed, runMode);
+    game = createGameV3(nextSeed, runMode, shipId); // R45.2: the ship model sets the laser energy capacity
     scoreMap = createGame(nextSeed).map();
     map = {...scoreMap, loops: Array.from({length: V3_TRACK_CYCLES}, () => scoreMap.loops).flat()};
     course = []; courseLoops = 0; ensureCourse(0);
@@ -405,7 +405,7 @@ function start(nextSeed) {
   applySettingsToOutputs();
   pause.runStarted();
   ensurePickupLayer(); // R39.3.1: the overlay is created on the run-start path, never at import
-  pickupSpeed.clear(); pickupView = null;
+  pickupSpeed.clear(); pickupView = null; resetBeams();
   closeLobby();
 }
 
@@ -575,6 +575,11 @@ const PICKUP_SPRITES = Object.freeze({ // tier (pickupTier names) -> [fill, half
   gem: ['#ffd166', 4],
 });
 const PICKUP_TIERS = Object.keys(PICKUP_SPRITES);
+// R45.4 visibility: every sprite drawn PICKUP_SCALE times its half-size, over a halo disc of
+// HALO_SCALE times that size in the tier's own fill at HALO_ALPHA (so no new fill colour); a gem
+// also gets a brighter rim stroke around its core.
+const PICKUP_SCALE = 1.6, HALO_SCALE = 2, HALO_ALPHA = 0.3;
+const GEM_RIM = '#fff4c7';
 const DEFAULT_ROCK_SPEED = 3600; // mu per tick; render2d's speed for a rock it never saw in a view row
 let pickupLayer = null, pickupCtx = null, pickupDirty = false, pickupWarned = false, pickupView = null;
 // Rock id -> mu per tick, learned from view asteroid rows: a pickup keeps its rock's id and speed.
@@ -782,101 +787,198 @@ function webglRows(rows) {
     return (w ?? row.state?.weapon) === 'laser' ? firelessRow(row) : row;
   })};
 }
+// The 2D fallback draws its own short stub on a fire_ready rise of its prev / curr pair and keeps it
+// for a moment after a release (render2d.js:76, 239). R45.3 makes the released overlay ray fly away,
+// so a laser rise is hidden from it (curr.fire_ready held at prev's); a rocket rise keeps its stub.
+function fallbackRows(rows) {
+  const {prev, curr} = rows;
+  if (runRuleset !== 'pl-v3' || !prev || !curr || !(curr.fire_ready > prev.fire_ready) || curr.weapon !== 'laser') return rows;
+  return {...rows, curr: {...curr, fire_ready: prev.fire_ready}};
+}
 
-// ------------------------------------------------------------------ laser ray (spec 27.4.2, R41.1, R43, R44)
-// Drawn on the pickup overlay before the pickups, only while the run is active and the sim reports
-// an open beam (state().beam_hold === 1); the only laser visual of a pl-v3 run (R44.1). R43: the
-// original laser look (web/render2d.js ship laser, '#ff4d6a') stretched to the live beam reach,
-// BEAM_SEGMENTS strokes from the ship along the aim column, each segment's alpha echoing the
-// BEAM_TIERS damage decay.
+// ------------------------------------------------------------------ laser ray (spec 27.4.2, R41.1, R43, R44, R45.3)
+// Drawn on the pickup overlay before the pickups; the only laser visual of a pl-v3 run (R44.1).
+// R45.3: while the sim reports an open beam the ray is ONE straight screen segment from the welded
+// ship base toward the far point sampled when the beam opened, so it never bends with the track.
+// When the beam closes (release or the energy law) the segment detaches and flies outward, fading.
+// Every ray, held or flying, goes through strokeRay: BEAM_SEGMENTS core strokes whose alpha echoes
+// the BEAM_TIERS damage decay, over one glow pass.
 const BEAM_SEGMENTS = 12;
 // Pinned red family (R43.2): core line + glow pass, matching the original laser stroke colour.
 const BEAM_CORE = '#ff4d6a';
 const BEAM_GLOW = 'rgba(255,77,106,0.35)';
 // Depth alphas by BEAM_TIERS band (near full brightness; far fades like the damage does).
 const BEAM_ALPHAS = Object.freeze([1, 0.7, 0.4]);
+// R45.3 look: a thin translucent core over a wider glow (CSS px, times dpr when drawn).
+const BEAM_CORE_ALPHA = 0.85, BEAM_CORE_W = 2, BEAM_GLOW_W = 5, BEAM_SPARK_R = 3;
 // Tip spark alpha of a just-opened beam; it rises to 1 as the reach charges up to BEAM_R_MAX.
 const SPARK_MIN_ALPHA = 0.3;
+// R45.3 flight: a detached ray moves outward by reach / FLIGHT_STEPS per frame step (one step is
+// one tick of wall time, so a 120 Hz screen flies as fast as a 60 Hz one) and its alpha falls
+// linearly from 1 to 0 over FLIGHT_STEPS steps. At most FLIGHT_MAX are in the air; the oldest drop.
+const FLIGHT_STEPS = 12, FLIGHT_MAX = 8;
 function beamBand(z) {
   const i = BEAM_TIERS.findIndex(([dMax]) => z <= dMax);
   return Math.min(BEAM_ALPHAS.length - 1, i < 0 ? BEAM_ALPHAS.length - 1 : i);
 }
-
-// The ray polyline in overlay pixels, base first (R44.2 anchor contract): the base is the
-// renderer's own ship position, and the other points follow that renderer's view of the aim column.
-function beamPoints(w, h, reach, X, Y) {
-  const depth = i => i / BEAM_SEGMENTS * reach / MU;
-  const welded2d = rendererKind === 'fallback2d' && shipAnchor[2] === 1;
-  if (!welded2d && rendererKind === 'webgl2') {
-    // WebGL: every point through the mirrored render.js camera, so the base sits on the ship mesh
-    // and the ray runs down the tube with it.
-    const pts = [];
-    for (let i = 0; i <= BEAM_SEGMENTS; i++) {
-      const p = shipMirror.aimPoint(depth(i), w, h);
-      if (!p) break;
-      pts.push(p);
-    }
-    if (pts.length === BEAM_SEGMENTS + 1) return pts;
+// Foreshortening along the ray: the screen distance from the base at depth z (mu), as a fraction
+// of the base-to-far-point vector. Rather than assuming a pinhole, the law is MEASURED from the
+// renderer each frame: FOCAL_DEPTHS samples taken from the mirror (WebGL) or the cross-section
+// pinhole (2D), interpolated piecewise linearly; between BEAM_R_MAX and 2 * BEAM_R_MAX the flying
+// head keeps creeping outward (asymptotically, like a pinhole beyond the far point) until it fades.
+// All points still lie on the frozen dir line, so the ray is straight by construction.
+const BEAM_FAR = BEAM_R_MAX / MU, BEAM_MID = BEAM_TIERS[0][0] / MU;
+const FOCAL_DEPTHS = Object.freeze([40000, BEAM_TIERS[0][0], BEAM_TIERS[1][0], BEAM_R_MAX, 2 * BEAM_R_MAX]);
+const LAW_FAR_I = 3; // index of BEAM_R_MAX: the fraction normalizer (1 at full reach)
+const depthFraction = (z, c) => (z / MU) * (c + BEAM_FAR) / ((c + z / MU) * BEAM_FAR);
+// c of the cross-section pinhole (render2d FOCAL, read back through projectCross's scale).
+const PINHOLE_C = (() => { const k = projectCross(1, 1, BEAM_MID, 0, 0)[2]; return k * BEAM_MID / (1 - k); })();
+const pinholeLaw = () => ({rs: FOCAL_DEPTHS.map(d => depthFraction(d, PINHOLE_C))});
+// Screen distances of the aim column at FOCAL_DEPTHS, relative to the base (WebGL) or to the
+// cross-section near point (2D); monotone (a shake must not walk points back down the ray).
+function measureLaw(w, h, base, X, Y) {
+  const rs = [];
+  // R45.3 (WEB9): every radius is measured from the welded base, not from the depth-0 projection.
+  // rs[0] === 0 by construction, so lawFrac(law, 0) === 0 and the ray's first point IS the ship.
+  // (Measuring from the depth-0 projection let a ~49 px base/projection offset leak into the first
+  // point as rs[0]/far of spread: the beam visibly detached from the ship at long reach.)
+  for (const d of FOCAL_DEPTHS) {
+    let p = null;
+    if (rendererKind === 'webgl2') p = shipMirror.aimPoint(d / MU, w, h);
+    if (!p) p = projectCross(w, h, d, X, Y);
+    rs.push(Math.hypot(p[0] - base[0], p[1] - base[1]));
   }
-  // Cross-section pinhole (the pickup convention). Alone, it is the last-resort fallback.
-  const pts = [];
-  for (let i = 0; i <= BEAM_SEGMENTS; i++) pts.push(projectCross(w, h, depth(i), X, Y));
-  if (welded2d) {
-    // 2D: shipAnchor is where render2d drew the ship this frame (R43.3). Its hop camera lag and
-    // shake shift its whole cross-section (render2d.js:160), so the ray moves by the same offset:
-    // the base lands on the anchor and the ray stays straight instead of kinking after the base.
-    const dx = shipAnchor[0] - pts[0][0], dy = shipAnchor[1] - pts[0][1];
-    for (const p of pts) { p[0] += dx; p[1] += dy; }
-    pts[0] = [shipAnchor[0], shipAnchor[1]];
-  }
-  return pts;
+  for (let i = 1; i < rs.length; i++) if (!(rs[i] > rs[i - 1])) rs[i] = rs[i - 1];
+  return rs[1] > 0 ? {rs} : pinholeLaw();
+}
+// Fraction of the base-to-far-point vector covered at depth z (mu); normalized at BEAM_R_MAX.
+function lawFrac(law, z) {
+  const rs = law.rs, far = rs[LAW_FAR_I];
+  if (!(far > 0)) return 0;
+  // R45.3 (WEB9): depth 0 is the welded base exactly. The interpolation grid starts at the first
+  // focal depth (> 0), so without this clamp a negative extrapolation shifted the ray's first
+  // point off the ship (the "beam not stucked" defect).
+  if (!(z > 0)) return 0;
+  const d = Math.min(Math.max(z, 0), FOCAL_DEPTHS[FOCAL_DEPTHS.length - 1]);
+  let hi = 1; while (FOCAL_DEPTHS[hi] < d) hi++;
+  const lo = hi - 1, t = (d - FOCAL_DEPTHS[lo]) / (FOCAL_DEPTHS[hi] - FOCAL_DEPTHS[lo]);
+  return (rs[lo] + (rs[hi] - rs[lo]) * t) / far;
 }
 
-function drawBeam(ctx, w, h, dpr) {
-  const s = currState;
-  if (!(running && s?.status === 'running' && s.beam_hold === 1)) return;
-  if (!(Number(s.beam_reach) > 0)) return;
-  const a = Math.min(1, Math.max(0, accumulator / TICK_MS));
-  // A release already lifted but not yet sent (R41.3: it goes out on the next tick, which closes the
-  // beam) fades the ray toward 0 at that tick, so the close does not pop from full brightness.
-  const fade = fireHeld === 0 && lastSent[2] === 1 ? 1 - a : 1;
-  if (fade < 0.02) return;
-  // Reach and aim point are interpolated like the renderers' ship. The reach grows from 0 on the
-  // opening tick, so the ray extends out of the ship instead of stepping in a tick at a time.
-  const reachFrom = prevState?.beam_hold === 1 ? Number(prevState.beam_reach) || 0 : 0;
-  const reach = reachFrom + (Number(s.beam_reach) - reachFrom) * a;
-  const from = prevState?.position ?? s.position;
-  const X = (from[0] + (s.position[0] - from[0]) * a) / MU;
-  const Y = (from[1] + (s.position[1] - from[1]) * a) / MU;
-  const pts = beamPoints(w, h, reach, X, Y);
-  const tip = pts[BEAM_SEGMENTS];
+// The open beam ({aim: {dir, law}, reach}) and the detached flying segments ({base, dir, law, tail,
+// head, speed, age}); base and dir are fractions of the overlay size so a resize keeps them in place.
+let liveRay = null, flights = [], beamSeenP = -1, flightClock = null;
+function resetBeams() { liveRay = null; flights = []; beamSeenP = -1; flightClock = null; }
+
+// The ray base in overlay pixels (R44.2 anchor contract): the renderer's own ship position.
+function beamBase(w, h, X, Y) {
+  if (rendererKind === 'fallback2d' && shipAnchor[2] === 1) return [shipAnchor[0], shipAnchor[1]];
+  if (rendererKind === 'webgl2') { const p = shipMirror.shipPoint(w, h); if (p) return p; }
+  const [x, y] = projectCross(w, h, 0, X, Y);
+  return [x, y];
+}
+// The ray's aim, sampled once per beam: the direction from the base toward where the aim column is
+// at full reach right now, and the foreshortening c along it. Under WebGL the far point is the
+// mirrored render.js camera's view of the tube; otherwise (or if that point is behind the camera)
+// the cross-section pinhole's, shifted onto the base.
+function beamAim(w, h, base, X, Y) {
+  let far = rendererKind === 'webgl2' ? shipMirror.aimPoint(BEAM_FAR, w, h) : null;
+  if (!far) {
+    const near = projectCross(w, h, 0, X, Y), end = projectCross(w, h, BEAM_FAR, X, Y);
+    far = [base[0] + end[0] - near[0], base[1] + end[1] - near[1]];
+  }
+  return {dir: [(far[0] - base[0]) / w, (far[1] - base[1]) / h], law: measureLaw(w, h, base, X, Y)};
+}
+
+// Walks the tick rows the overlay has not seen yet, so a beam that opens and closes between two
+// frames still flies. A shorter reach on an open row means a new beam opened after a close.
+function syncBeams(w, h, base, X, Y) {
+  const detach = () => {
+    if (!liveRay) return;
+    const {dir, law} = liveRay.aim ?? beamAim(w, h, base, X, Y);
+    flights.push({base: [base[0] / w, base[1] / h], dir, law, tail: 0, head: liveRay.reach, speed: liveRay.reach / FLIGHT_STEPS, age: 0});
+    if (flights.length > FLIGHT_MAX) flights.splice(0, flights.length - FLIGHT_MAX);
+    liveRay = null;
+  };
+  for (const row of trail) {
+    if (!(row.p > beamSeenP)) continue;
+    beamSeenP = row.p;
+    const reach = row.state?.beam_hold === 1 ? Number(row.state.beam_reach) || 0 : 0;
+    if (liveRay && reach > 0 && reach < liveRay.reach) detach();
+    if (reach > 0) (liveRay ??= {aim: null, reach: 0}).reach = reach;
+    else detach();
+  }
+  if (liveRay && !liveRay.aim) liveRay.aim = beamAim(w, h, base, X, Y);
+}
+
+// Frame steps since the last overlay draw; 0 while paused, so a paused flight holds still.
+function flightSteps(now) {
+  const last = flightClock;
+  flightClock = now;
+  if (last === null || !Number.isFinite(now) || pause.isPaused()) return 0;
+  return Math.min(4, Math.max(0, (now - last) / TICK_MS));
+}
+
+// One straight ray from depth tail to depth head (mu): every point is base + dir * fraction, so all
+// BEAM_SEGMENTS + 1 points lie on one line by construction.
+function strokeRay(ctx, w, h, dpr, base, {dir, law}, tail, head, alpha, sparkAlpha) {
+  const pts = [];
+  for (let i = 0; i <= BEAM_SEGMENTS; i++) {
+    const f = lawFrac(law, tail + (head - tail) * i / BEAM_SEGMENTS);
+    pts.push([base[0] + dir[0] * w * f, base[1] + dir[1] * h * f]);
+  }
   ctx.lineJoin = 'round';
-  // Glow (R43.2): one pass along the core's own polyline, so it is a halo around the core.
-  ctx.globalAlpha = fade; ctx.lineCap = 'round';
-  ctx.strokeStyle = BEAM_GLOW; ctx.lineWidth = 7 * dpr;
+  // Glow (R43.2, width per R45.3): one pass along the core's own line, a halo around the core.
+  ctx.globalAlpha = alpha; ctx.lineCap = 'round';
+  ctx.strokeStyle = BEAM_GLOW; ctx.lineWidth = BEAM_GLOW_W * dpr;
   ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
   for (let i = 1; i <= BEAM_SEGMENTS; i++) ctx.lineTo(pts[i][0], pts[i][1]);
   ctx.stroke();
-  // Core (R43.2): one stroke per segment. Opaque segments keep round caps (overlapping caps are
-  // invisible at alpha 1); translucent ones use butt caps, so neighbours abut instead of blending a
-  // bright bead into every joint.
-  ctx.strokeStyle = BEAM_CORE; ctx.lineWidth = 3 * dpr;
+  // Core: one stroke per segment. The core is always translucent now (R45.3), so butt caps keep
+  // neighbours abutting instead of blending a bright bead into every joint.
+  ctx.strokeStyle = BEAM_CORE; ctx.lineWidth = BEAM_CORE_W * dpr; ctx.lineCap = 'butt';
   for (let i = 0; i < BEAM_SEGMENTS; i++) {
-    const alpha = fade * BEAM_ALPHAS[beamBand((i + 0.5) / BEAM_SEGMENTS * reach)];
-    ctx.globalAlpha = alpha; ctx.lineCap = alpha < 1 ? 'butt' : 'round';
+    ctx.globalAlpha = alpha * BEAM_CORE_ALPHA * BEAM_ALPHAS[beamBand(tail + (head - tail) * (i + 0.5) / BEAM_SEGMENTS)];
     ctx.beginPath(); ctx.moveTo(pts[i][0], pts[i][1]); ctx.lineTo(pts[i + 1][0], pts[i + 1][1]); ctx.stroke();
   }
-  // Tip spark at the live reach end; it brightens with charge, so a held beam visibly charges.
-  ctx.globalAlpha = fade * (SPARK_MIN_ALPHA + (1 - SPARK_MIN_ALPHA) * Math.min(1, reach / BEAM_R_MAX));
+  ctx.globalAlpha = alpha * sparkAlpha;
   ctx.fillStyle = BEAM_CORE;
-  ctx.beginPath(); ctx.arc(tip[0], tip[1], 3 * dpr, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(pts[BEAM_SEGMENTS][0], pts[BEAM_SEGMENTS][1], BEAM_SPARK_R * dpr, 0, Math.PI * 2); ctx.fill();
   ctx.globalAlpha = 1;
 }
 
-function drawPickups() {
+function drawBeam(ctx, w, h, dpr, now) {
+  const s = currState;
+  const a = Math.min(1, Math.max(0, accumulator / TICK_MS));
+  const from = prevState?.position ?? s.position;
+  const X = (from[0] + (s.position[0] - from[0]) * a) / MU;
+  const Y = (from[1] + (s.position[1] - from[1]) * a) / MU;
+  const base = beamBase(w, h, X, Y);
+  const steps = flightSteps(now);
+  for (const f of flights) { f.tail += f.speed * steps; f.head += f.speed * steps; f.age += steps; }
+  flights = flights.filter(f => f.age < FLIGHT_STEPS && f.tail <= BEAM_R_MAX);
+  syncBeams(w, h, base, X, Y);
+  // The held ray first, so the first moveTo of the frame stays the welded base (R43.3).
+  if (liveRay && s.beam_hold === 1 && Number(s.beam_reach) > 0) {
+    // Reach is interpolated like the renderers' ship; it grows from 0 on the opening tick, so the
+    // ray extends out of the ship instead of stepping in a tick at a time.
+    const reachFrom = prevState?.beam_hold === 1 ? Number(prevState.beam_reach) || 0 : 0;
+    const reach = reachFrom + (Number(s.beam_reach) - reachFrom) * a;
+    // The tip spark brightens with charge, so a held beam visibly charges.
+    // PM fix (R45.3 harvest): the direction stays frozen at beam start (that is the straight law),
+    // but the foreshortening law is refitted every frame so the tip tracks the moving camera.
+    // The law only spreads points along the frozen line, so refitting it cannot bend the ray.
+    const aim = {dir: liveRay.aim.dir, law: measureLaw(w, h, base, X, Y)};
+    strokeRay(ctx, w, h, dpr, base, aim, 0, reach, 1, SPARK_MIN_ALPHA + (1 - SPARK_MIN_ALPHA) * Math.min(1, reach / BEAM_R_MAX));
+  }
+  for (const f of flights) strokeRay(ctx, w, h, dpr, [f.base[0] * w, f.base[1] * h], f, f.tail, f.head, 1 - f.age / FLIGHT_STEPS, 1);
+}
+
+function drawPickups(now) {
   if (!pickupCtx) return;
   const ctx = pickupCtx;
   if (!(running && currState?.status === 'running')) { // lobby, game over, abandoned: nothing drawn
+    resetBeams(); // nothing keeps flying into the next run
     if (pickupDirty) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, pickupLayer.width, pickupLayer.height); pickupDirty = false; }
     return;
   }
@@ -887,7 +989,7 @@ function drawPickups() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, w, h);
   pickupDirty = true;
-  drawBeam(ctx, w, h, dpr); // R41.1: the ray first, so minerals paint over it
+  drawBeam(ctx, w, h, dpr, now); // R41.1: the ray first, so minerals paint over it
   const list = view?.pickups;
   if (!Array.isArray(list) || list.length === 0) return;
   const p = currState.processed, shipLane = currState.lane;
@@ -904,20 +1006,30 @@ function drawPickups() {
     if (!tier || !Number.isFinite(ticks) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
     const d = (ticks + lag) * (pickupSpeed.get(id) ?? DEFAULT_ROCK_SPEED) / MU;
     const [sx, sy] = projectCross(w, h, d, x / MU + (lane - shipLane) * LANE_SPACING, y / MU);
-    const s = PICKUP_SPRITES[tier][1] * dpr;
-    if (sx < -s || sy < -s || sx > w + s || sy > h + s) continue;
+    const s = PICKUP_SPRITES[tier][1] * PICKUP_SCALE * dpr, halo = s * HALO_SCALE;
+    if (sx < -halo || sy < -halo || sx > w + halo || sy > h + halo) continue;
     (byTier[tier] ??= []).push(sx, sy, s);
   }
   for (const tier of PICKUP_TIERS) {
     const pts = byTier[tier];
     if (!pts) continue;
+    ctx.fillStyle = PICKUP_SPRITES[tier][0];
+    // Halo first, one path per tier, so the solid core paints over it.
+    ctx.globalAlpha = HALO_ALPHA;
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i += 3) {
+      const x = pts[i], y = pts[i + 1], r = pts[i + 2] * HALO_SCALE;
+      ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    ctx.globalAlpha = 1;
     ctx.beginPath();
     for (let i = 0; i < pts.length; i += 3) { // diamond: a square rotated 45 degrees
       const x = pts[i], y = pts[i + 1], s = pts[i + 2];
       ctx.moveTo(x, y - s); ctx.lineTo(x + s, y); ctx.lineTo(x, y + s); ctx.lineTo(x - s, y); ctx.closePath();
     }
-    ctx.fillStyle = PICKUP_SPRITES[tier][0];
     ctx.fill();
+    if (tier === 'gem') { ctx.strokeStyle = GEM_RIM; ctx.lineWidth = dpr; ctx.lineJoin = 'round'; ctx.stroke(); }
   }
 }
 
@@ -932,7 +1044,7 @@ function frame(timestamp) {
   const rows = currState
     ? {prev: prevState, curr: currState, alpha: ended ? 1 : accumulator / TICK_MS, view, trail, paused: pause.isPaused() || !running, now: timestamp}
     : {cruise: timestamp / 1000, now: timestamp};
-  const drawRows = rendererKind === 'webgl2' ? webglRows(rows) : rows; // R44.1
+  const drawRows = rendererKind === 'webgl2' ? webglRows(rows) : fallbackRows(rows); // R44.1, R45.3
   try { renderer.draw(drawRows); }
   catch (err) {
     if (rendererKind === 'webgl2') { console.warn('WebGL2 draw failed, switching to the 2D fallback:', err?.message ?? err); useFallback('lost'); }
@@ -944,11 +1056,12 @@ function frame(timestamp) {
       const glCanvas = $('canvas');
       shipMirror.advance(drawRows, Boolean(settingsNow().reduced_motion), glCanvas.width / glCanvas.height);
     }
-    drawPickups();
+    drawPickups(timestamp);
   }
   catch (err) { if (!pickupWarned) { pickupWarned = true; console.warn('Pickup overlay draw failed:', err?.message ?? err); } }
   // W4c R-1: HUD DOM writes only when a tick produced a new state row, not on every frame.
-  if (currState && currState !== hudState) { renderHud(document, currState, scoreMap); hudState = currState; }
+  // R45.5: the LASER meter's capacity is the one the sim was created with (runShip = shipId at start).
+  if (currState && currState !== hudState) { renderHud(document, currState, scoreMap, {shipId: runShip}); hudState = currState; }
   requestAnimationFrame(frame);
 }
 

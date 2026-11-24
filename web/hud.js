@@ -2,7 +2,7 @@
 // of state() and map(). Never calls step/abandon and nothing here flows back into an input entry.
 // The controls it paints (boost charge ring, hop ready/dim, ammo badge) are presentation of the
 // sim state row; every press still goes through app.js as a sim input.
-import {CHARGE_CAP, HOP_COST, ROCKET_CAP} from '../src/sim/space_racer_v3.js';
+import {CHARGE_CAP, HOP_COST, ROCKET_CAP, ENERGY_CAPACITY} from '../src/sim/space_racer_v3.js';
 
 const MAX_TICKS = 7200;
 const ENERGY_CAP = 10000;
@@ -23,7 +23,14 @@ export function boostState(charge) {
   return charge > 0 ? 'charging' : 'spent';
 }
 
-function formatHudV3(state, map) {
+// R45.2 / R45.5: laser energy capacity of a ship model id, with the sim's own fallback (anything
+// that is not an own key of ENERGY_CAPACITY flies as 'dart').
+function laserCapacity(shipId) {
+  const known = typeof shipId === 'string' && Object.prototype.hasOwnProperty.call(ENERGY_CAPACITY, shipId);
+  return ENERGY_CAPACITY[known ? shipId : 'dart'];
+}
+
+function formatHudV3(state, map, options) {
   const loops = map?.loops ?? [];
   const loopCount = loops.length || 3;
   const bpm = loops[state.loop % loopCount]?.bpm ?? [90, 120, 150][state.loop % 3];
@@ -33,6 +40,8 @@ function formatHudV3(state, map) {
   const low = charge < HOP_COST;
   const bState = boostState(charge);
   const active = state.processed < state.boost_until;
+  const cap = laserCapacity(options.shipId);
+  const laser = Math.max(0, Math.min(cap, Number.isFinite(state.energy) ? state.energy : cap));
   return {
     v3: true,
     score: `${formatKm(state.distance)} KM · ${MODE_LABELS[state.mode] ?? state.mode}`,
@@ -42,6 +51,7 @@ function formatHudV3(state, map) {
       label: active ? 'ON' : bState === 'ready' ? 'BOOST' : bState === 'spent' ? 'EMPTY' : `${charge}%`},
     hop: {ready: !cooldown && !low, why: low ? 'charge' : cooldown ? 'cooldown' : ''},
     ammo: {value: state.ammo, max: ROCKET_CAP, text: String(state.ammo)},
+    laser: {value: laser, max: cap, percent: laser * 100 / cap, empty: laser === 0},
     lane: `${state.lane + 1} / ${state.lane_count}`,
     loop: `${state.loop + 1} · ${bpm} BPM`,
     weapon: fireIn > 0 ? `${state.weapon} · ${fireIn}` : `${state.weapon} · ready`,
@@ -49,8 +59,9 @@ function formatHudV3(state, map) {
 }
 
 // Pure formatting; testable without a DOM. `state` is Game.state(), `map` is Game.map() (or null).
-export function formatHud(state, map = null) {
-  if (state.ruleset_id === 'pl-v3') return formatHudV3(state, map);
+// `options.shipId` is the ship model the pl-v3 game was created with (the LASER meter capacity).
+export function formatHud(state, map = null, options = {}) {
+  if (state.ruleset_id === 'pl-v3') return formatHudV3(state, map, options ?? {});
   const loops = map?.loops ?? [];
   const loopCount = loops.length || 3;
   const loopIndex = Math.min(state.loop, loopCount - 1);
@@ -139,7 +150,31 @@ export function buildControls(doc) {
     ammo.append(icon, n);
     fire.after(ammo);
   }
-  return {boost, ammo};
+  const charge = doc.getElementById('hud-energy');
+  let laser = doc.getElementById('hud-laser');
+  if (charge && !laser) {
+    // R45.5: the LASER energy meter, right after the charge meter and shaped like it (a track with
+    // a fill). Its look is inline: lobby.css keys the meter rules to the #hud-energy id and
+    // web/style.css is not linked by index.html. Hidden until a pl-v3 state paints it.
+    laser = doc.createElement('div');
+    laser.id = 'hud-laser';
+    laser.setAttribute('role', 'meter');
+    laser.setAttribute('aria-label', 'Laser energy');
+    laser.setAttribute('aria-valuemin', '0');
+    Object.assign(laser.style, {display: 'none', alignItems: 'center', gap: '6px', minWidth: '120px',
+      fontSize: '11px', letterSpacing: '2px', color: '#ff4d6a'});
+    const bar = doc.createElement('span');
+    bar.className = 'bar';
+    Object.assign(bar.style, {display: 'block', flex: '1', height: '6px', border: '1px solid #3d4764', borderRadius: '4px',
+      background: '#0b0e1a', overflow: 'hidden'});
+    const fill = doc.createElement('i');
+    Object.assign(fill.style, {display: 'block', height: '100%', width: '100%', background: '#ff4d6a',
+      boxShadow: '0 0 6px rgba(255,77,106,.9)'});
+    bar.append(fill);
+    laser.append('LASER', bar);
+    charge.after(laser);
+  }
+  return {boost, ammo, laser};
 }
 
 // Paints the rocket latch (state lives in app.js only): aria-pressed on the badge and on #fire,
@@ -160,8 +195,8 @@ export function paintRocketLatch(doc, on) {
   }
 }
 
-export function renderHud(root, state, map = null) {
-  const f = formatHud(state, map);
+export function renderHud(root, state, map = null, options = {}) {
+  const f = formatHud(state, map, options);
   const q = id => root.querySelector('#' + id);
   const set = (id, text) => { const el = q(id); if (el && el.textContent !== text) el.textContent = text; };
   const attr = (el, k, v) => { if (el && el.getAttribute(k) !== v) el.setAttribute(k, v); };
@@ -182,6 +217,28 @@ export function renderHud(root, state, map = null) {
     if (bar) bar.style.width = f.energy.percent + '%';
     const val = energy.querySelector('.val');
     if (val && val.textContent !== f.energy.text) val.textContent = f.energy.text;
+  }
+  // R45.5 LASER meter: width = energy / capacity of the run's ship model; a dim flash and a red
+  // track edge when it runs dry (the moment a held press stops producing a beam).
+  const laser = q('hud-laser');
+  if (laser) {
+    const display = f.v3 ? 'flex' : 'none';
+    if (laser.style.display !== display) laser.style.display = display;
+    if (f.v3) {
+      const L = f.laser;
+      attr(laser, 'aria-valuemax', String(L.max));
+      attr(laser, 'aria-valuenow', String(L.value));
+      const fill = laser.querySelector('.bar > i');
+      const width = `${Math.round(L.percent * 10) / 10}%`;
+      if (fill && fill.style.width !== width) fill.style.width = width;
+      const wasEmpty = laser.dataset.empty === 'true';
+      data(laser, 'empty', String(L.empty));
+      if (L.empty !== wasEmpty) {
+        const bar = laser.querySelector('.bar');
+        if (bar) bar.style.borderColor = L.empty ? '#ff4d6a' : '#3d4764';
+        if (L.empty) laser.animate?.([{opacity: 1}, {opacity: 0.35}, {opacity: 1}], {duration: 240});
+      }
+    }
   }
   const boost = q('boost'), ammo = q('hud-ammo'), fire = q('fire');
   if (boost) {
