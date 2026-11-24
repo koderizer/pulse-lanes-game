@@ -536,8 +536,9 @@ export function createGame(seed, mode) {
     rockets = flying;
   };
 
-  // Returns true on collision. NOTE 6: a pickup is collected only at its onset tick, in its lane,
-  // with the strict asteroid-style sphere test; every pickup despawns after its onset tick.
+  // Returns true on collision. NOTE 30 (spec 26.3.5, ruling R39): pickups are collected
+  // automatically at their onset tick whatever the ship lane or position (the NOTE 6 lane and
+  // sphere test are retired for pl-v3); every pickup despawns at that point.
   const doContact = (t, L) => {
     let collided = false;
     const r = course[L].atOnset.get(t * MAX_LANES + lane);
@@ -546,18 +547,19 @@ export function createGame(seed, mode) {
         const dx = x - r[9], dy = y - r[10], reach = SHIP_RADIUS + r[6];
         if (dx * dx + dy * dy < reach * reach) collided = true;
         else dodged++;
-      } else if (pickups.has(r[0])) {
-        const pk = pickups.get(r[0]);
-        const dx = x - pk.x, dy = y - pk.y, reach = SHIP_RADIUS + PICKUP_RADIUS;
-        if (dx * dx + dy * dy < reach * reach) {
-          // NOTE 29 (26.3.3): the pickup grants its own amount, clamped at the cap.
-          if (pk.kind === 1) charge = Math.min(CHARGE_CAP, charge + pk.amount);
-          else ammo = Math.min(ROCKET_CAP, ammo + pk.amount);
-          events.push([t, 5, pk.kind, pk.x, pk.y]);
-        }
       }
     }
-    for (const [id, pk] of pickups) if (pk.onset <= t) pickups.delete(id);
+    // pickup collection (NOTE 30, spec 26.3.5, R39): every pickup whose onset is this tick is
+    // collected automatically, whatever the ship lane or position (no lane, sphere or position
+    // test), in destruction-call order (NOTE 31: Map insertion order), also on a collision tick
+    // (NOTE 32). NOTE 29 (26.3.3): the pickup grants its own amount, clamped at the cap.
+    for (const pk of pickups.values()) {
+      if (pk.onset !== t) continue;
+      if (pk.kind === 1) charge = Math.min(CHARGE_CAP, charge + pk.amount);
+      else ammo = Math.min(ROCKET_CAP, ammo + pk.amount);
+      events.push([t, 5, pk.kind, pk.x, pk.y]);
+    }
+    for (const [id, pk] of pickups) if (pk.onset <= t) pickups.delete(id); // NOTE 6: despawn after onset tick
     return collided;
   };
 
@@ -633,7 +635,7 @@ export function createGame(seed, mode) {
       live.sort((a, c) => a.id - c.id);
       return {
         asteroids,
-        pickups: live.map(pk => [pk.id, pk.kind, pk.lane, pk.x, pk.y, (pk.onset - p) * pk.speed]),
+        pickups: live.map(pk => [pk.id, pk.kind, pk.lane, pk.x, pk.y, pk.onset - p, pk.amount]),
         rockets: rockets.map(rk => [rk[0], rk[1], rk[2], rk[3], rk[4]]),
       };
     },

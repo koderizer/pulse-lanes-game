@@ -3,7 +3,7 @@
 // New runs play pl-v3 (spec 21, ruling R35) in the lobby mode; the pl-v2 module stays for the
 // lobby backdrop, the shared tunnel geometry and a legacy (v1 challenge) pl-v2 run path.
 import {createGame, TICKS_PER_SECOND, MAX_TICKS, WEAPONS} from '../src/sim/space_racer.js';
-import {createGame as createGameV3, loopCourse, loopStart, MODES, MODE_TICKS, validateInputs as validateInputsV3} from '../src/sim/space_racer_v3.js';
+import {createGame as createGameV3, loopCourse, loopStart, MINERAL_NORMAL, MODES, MODE_TICKS, validateInputs as validateInputsV3} from '../src/sim/space_racer_v3.js';
 import {newSave, importSave, exportSave, STORAGE_KEY} from '../src/state/pilot_state.js';
 import {quantizeStick, keyboardStick, MAX_RADIUS_PX, CAPTURE_RADIUS_PX} from '../src/input/controls.js';
 import {digest} from './digest.js';
@@ -13,8 +13,8 @@ import {Sfx} from './sfx.js';
 import {renderHud, buildControls, formatKm, MODE_LABELS, paintRocketLatch} from './hud.js';
 import {createPause} from './pause.js';
 import {applySetting, defaultSettings, lastResultText, retryEnabled, SETTING_CONTROLS} from './lobby_model.js';
-import {createRenderer} from './render.js';
-import {createRenderer2d} from './render2d.js';
+import {createRenderer, LANE_SPACING, MU} from './render.js';
+import {createRenderer2d, projectCross} from './render2d.js';
 import {createGameOver, drawShipPlan} from './gameover.js';
 import {SHIPS, SHIP_KEY, shipIdOrDefault, outlineBounds} from './ships.js';
 import {applyChallenge, createScanOverlay} from './challenge.js';
@@ -400,6 +400,8 @@ function start(nextSeed) {
   runSettings = {...settingsNow()};
   applySettingsToOutputs();
   pause.runStarted();
+  ensurePickupLayer(); // R39.3.1: the overlay is created on the run-start path, never at import
+  pickupSpeed.clear(); pickupView = null;
   closeLobby();
 }
 
@@ -533,6 +535,104 @@ function tickOnce() {
   if (currState.status === 'ended') finishRun();
 }
 
+// ------------------------------------------------------------------ pickup overlay (spec 26.3.6, R39.3.1)
+// One 2D canvas (id pickup-layer) stacked right after the game canvas, so it paints above it and
+// below the HUD and touch controls; the same code path serves both renderer kinds (render.js stays
+// untouched). Created on the run-start path, drawn only while a run is active, cleared every frame,
+// one path fill per tier. Presentation only: it reads view/state/course rows, never inputs.
+const PICKUP_SPRITES = Object.freeze({ // tier (pickupTier names) -> [fill, half-size in CSS px]
+  mineral_small: ['rgba(207,239,255,0.45)', 3],
+  mineral_normal: ['rgba(207,239,255,0.7)', 4],
+  mineral_large: ['rgba(207,239,255,1)', 5],
+  gem: ['#ffd166', 4],
+});
+const PICKUP_TIERS = Object.keys(PICKUP_SPRITES);
+const DEFAULT_ROCK_SPEED = 3600; // mu per tick; render2d's speed for a rock it never saw in a view row
+let pickupLayer = null, pickupCtx = null, pickupDirty = false, pickupWarned = false, pickupView = null;
+// Rock id -> mu per tick, learned from view asteroid rows: a pickup keeps its rock's id and speed.
+const pickupSpeed = new Map();
+
+function ensurePickupLayer() {
+  if (pickupLayer) return;
+  const layer = document.createElement('canvas');
+  layer.id = 'pickup-layer';
+  layer.setAttribute('aria-hidden', 'true');
+  // Same CSS box as canvas#canvas (lobby.css: fixed, full viewport); transparent and inert.
+  Object.assign(layer.style, {position: 'fixed', top: '0', left: '0', width: '100%', height: '100%',
+    display: 'block', background: 'transparent', pointerEvents: 'none'});
+  $('canvas').after(layer); // the 2D fallback swap replaces #canvas in place; this sibling stays
+  pickupLayer = layer;
+  pickupCtx = layer.getContext('2d');
+}
+
+function syncPickupSpeeds(p) {
+  if (view === pickupView) return;
+  pickupView = view;
+  const keep = new Set();
+  for (const [id, , , z] of view.asteroids ?? []) {
+    keep.add(id);
+    const row = course[id];
+    if (row && row[3] > p) pickupSpeed.set(id, z / (row[3] - p));
+  }
+  for (const e of view.pickups ?? []) keep.add(e?.[0]);
+  for (const id of pickupSpeed.keys()) if (!keep.has(id)) pickupSpeed.delete(id);
+}
+
+// Ticks until the pickup's onset. A 7-field entry carries it (R39.3); a defensive 6-field entry
+// (pre-TA-10 sim, whose sixth field is a depth) takes it from its rock's course row (same onset).
+function pickupTicksLeft(e, p) {
+  if (e.length >= 7) return e[5];
+  const row = course[e[0]];
+  return row ? row[3] - p : NaN;
+}
+
+function drawPickups() {
+  if (!pickupCtx) return;
+  const ctx = pickupCtx;
+  if (!(running && currState?.status === 'running')) { // lobby, game over, abandoned: nothing drawn
+    if (pickupDirty) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, pickupLayer.width, pickupLayer.height); pickupDirty = false; }
+    return;
+  }
+  const dpr = Math.min(globalThis.devicePixelRatio || 1, settingsNow().quality === 'low' ? 1 : 2);
+  const w = Math.max(1, Math.round((pickupLayer.clientWidth || pickupLayer.width) * dpr));
+  const h = Math.max(1, Math.round((pickupLayer.clientHeight || pickupLayer.height) * dpr));
+  if (pickupLayer.width !== w || pickupLayer.height !== h) { pickupLayer.width = w; pickupLayer.height = h; }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  pickupDirty = true;
+  const list = view?.pickups;
+  if (!Array.isArray(list) || list.length === 0) return;
+  const p = currState.processed, shipLane = currState.lane;
+  // Both renderers present asteroids at T = processed - 2 + alpha; view rows are for tick processed.
+  const lag = 2 - Math.min(1, Math.max(0, accumulator / TICK_MS));
+  syncPickupSpeeds(p);
+  const byTier = {};
+  for (const e of list) {
+    if (!Array.isArray(e) || e.length < 6) continue;
+    const [id, kind, lane, x, y] = e;
+    // A 6-field entry (no amount) renders at normal brightness; unknown kinds are not drawn.
+    const tier = pickupTier(kind, e.length >= 7 && Number.isFinite(e[6]) ? e[6] : MINERAL_NORMAL);
+    const ticks = pickupTicksLeft(e, p);
+    if (!tier || !Number.isFinite(ticks) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const d = (ticks + lag) * (pickupSpeed.get(id) ?? DEFAULT_ROCK_SPEED) / MU;
+    const [sx, sy] = projectCross(w, h, d, x / MU + (lane - shipLane) * LANE_SPACING, y / MU);
+    const s = PICKUP_SPRITES[tier][1] * dpr;
+    if (sx < -s || sy < -s || sx > w + s || sy > h + s) continue;
+    (byTier[tier] ??= []).push(sx, sy, s);
+  }
+  for (const tier of PICKUP_TIERS) {
+    const pts = byTier[tier];
+    if (!pts) continue;
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i += 3) { // diamond: a square rotated 45 degrees
+      const x = pts[i], y = pts[i + 1], s = pts[i + 2];
+      ctx.moveTo(x, y - s); ctx.lineTo(x + s, y); ctx.lineTo(x, y + s); ctx.lineTo(x - s, y); ctx.closePath();
+    }
+    ctx.fillStyle = PICKUP_SPRITES[tier][0];
+    ctx.fill();
+  }
+}
+
 // ------------------------------------------------------------------ frame loop
 function frame(timestamp) {
   if (running && !pause.isPaused() && !document.hidden) {
@@ -548,6 +648,9 @@ function frame(timestamp) {
   catch (err) {
     if (rendererKind === 'webgl2') { console.warn('WebGL2 draw failed, switching to the 2D fallback:', err?.message ?? err); useFallback('lost'); }
   }
+  // Spec 26.3.6: pickups on the overlay, after the game canvas frame (either renderer kind).
+  try { drawPickups(); }
+  catch (err) { if (!pickupWarned) { pickupWarned = true; console.warn('Pickup overlay draw failed:', err?.message ?? err); } }
   // W4c R-1: HUD DOM writes only when a tick produced a new state row, not on every frame.
   if (currState && currState !== hudState) { renderHud(document, currState, scoreMap); hudState = currState; }
   requestAnimationFrame(frame);

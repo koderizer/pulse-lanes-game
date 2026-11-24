@@ -14,6 +14,15 @@ const SIDES = [6, 5, 4, 8, 7, 9, 4, 0];
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const lerp = (a, b, t) => a + (b - a) * t;
 
+// Shared projection helper (R39.3.1): the cross-section pinhole of draw() (frame centre
+// (w / 2, 0.54 h), ship-plane disc radius min(0.46 w, 0.44 h) = TUBE_R, scale
+// k(d) = FOCAL / (FOCAL + d)) for a point d world units ahead of the ship plane at lateral offset
+// (X, Y) world units from the view axis. Returns [x, y, k] in canvas pixels. Pure; draw() is unchanged.
+export function projectCross(w, h, d, X, Y) {
+  const unit = Math.min(w * 0.46, h * 0.44) / TUBE_R, k = FOCAL / (FOCAL + Math.max(d, -FOCAL * 0.7));
+  return [w / 2 + X * k * unit, h * 0.54 - Y * k * unit, k];
+}
+
 export function createRenderer2d(opts = {}) {
   const canvas = opts.canvas;
   const ctx = canvas?.getContext?.('2d');
