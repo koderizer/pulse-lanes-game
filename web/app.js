@@ -749,6 +749,9 @@ function createShipMirror() {
   }
 
   return {setCourse, advance, aimPoint, shipPoint: (w, h) => aimPoint(0, w, h),
+    // The loop weapon a fire tick falls in (render.js:687 reads the same table from the same map);
+    // null when no loop covers it, in which case render.js falls back to the row's state.weapon.
+    fireWeaponAt: p => track.loops[track.loopAtTick(Math.max(0, p - 1))]?.weapon ?? null,
     lanes: () => ({shipLaneF, camLaneF, camLaneVel})};
 }
 // SHIP-MIRROR-END
@@ -757,8 +760,9 @@ const shipMirror = createShipMirror();
 // ------------------------------------------------------------------ one laser visual under WebGL (R44.1)
 // render.js (frozen) draws its own short laser stub, muzzle flash and fire shake on every fire_ready
 // rise it reads in the trail rows (render.js lines 680 to 699). In a pl-v3 run the overlay ray is the
-// laser, so the WebGL renderer gets a copy of the trail whose state views pin fire_ready to 0: no
-// rise, no stub. Every other field and reference is the original (p, view with its asteroids and
+// laser, so the WebGL renderer gets a copy of the LASER trail rows whose state views pin fire_ready
+// to 0: no rise, no stub. Rocket ticks stay unmasked (their beam, muzzle and shake are render.js's
+// and stay), every other field and reference is the original (p, view with its asteroids and
 // rockets, and every other state field), so rocket flight, hit flashes, explosions and the hop
 // shake are unchanged. Trail rows are immutable, so each masked row is built once. A pl-v2 run
 // keeps its rows: the stub is its only laser visual and the overlay draws no ray there.
@@ -770,7 +774,13 @@ function firelessRow(row) {
 }
 function webglRows(rows) {
   if (runRuleset !== 'pl-v3' || !Array.isArray(rows.trail)) return rows;
-  return {...rows, trail: rows.trail.map(firelessRow)};
+  // Mask only the rows whose fire tick sits in a laser loop (render.js:687 weapon rule, same table
+  // through the mirror). Rocket ticks keep their fire_ready rise: their orange beam, muzzle and
+  // launch shake from render.js are untouched, and the rise also advances lastFireReady internally.
+  return {...rows, trail: rows.trail.map(row => {
+    const w = shipMirror.fireWeaponAt(row.p);
+    return (w ?? row.state?.weapon) === 'laser' ? firelessRow(row) : row;
+  })};
 }
 
 // ------------------------------------------------------------------ laser ray (spec 27.4.2, R41.1, R43, R44)
