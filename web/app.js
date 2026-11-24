@@ -613,23 +613,21 @@ function pickupTicksLeft(e, p) {
   return row ? row[3] - p : NaN;
 }
 
-// ------------------------------------------------------------------ laser ray (spec 27.4.2, R41.1/R41.2)
+// ------------------------------------------------------------------ laser ray (spec 27.4.2, R41.1, restyled by R43)
 // Drawn on the pickup overlay before the pickups, only while the run is active and the sim reports
-// an open beam (state().beam_hold === 1). BEAM_SEGMENTS segments run from the ship nose along the
-// aim axis to state().beam_reach mu, projected with projectCross like the pickups. Each segment is
-// one filled trapezoid (core width 4 px at the nose to 1 px at the tip) plus its outline stroke.
+// an open beam (state().beam_hold === 1). R43 (owner playtest): the original 2d renderer's laser
+// look (web/render2d.js ship laser, '#ff4d6a'), stretched to the live beam reach. BEAM_SEGMENTS
+// line segments run from the ship (projectCross at z = 0, no world nose lift) to the reach point
+// along the aim column; each segment's alpha echoes the BEAM_TIERS damage decay.
 const BEAM_SEGMENTS = 12;
-// Pinned cyan family (R41.2): near / mid / far fills by the BEAM_TIERS depth band a segment's
-// middle sits in (visual echo of the 3 / 2 / 1 damage decay), and the tip glow.
-const BEAM_FILLS = Object.freeze(['rgba(77,232,255,1)', 'rgba(77,232,255,0.7)', 'rgba(77,232,255,0.4)']);
-const BEAM_GLOW = 'rgba(77,232,255,0.15)';
-const BEAM_W_NOSE = 4, BEAM_W_TIP = 1, BEAM_GLOW_R = 6; // CSS px; 27.4.2 allows a 3 to 5 px core
-// World units the nose sits above the aim point: render2d's ship sprite tip (SHIP_R 8 * 1.3). The
-// ray converges onto the aim column at its reach end, where the sim's hits happen.
-const BEAM_NOSE_UP = 8 * 1.3;
+// Pinned red family (R43.2): core line + glow pass, matching the original laser stroke colour.
+const BEAM_CORE = '#ff4d6a';
+const BEAM_GLOW = 'rgba(255,77,106,0.35)';
+// Depth alphas by BEAM_TIERS band (near full brightness; far fades like the damage does).
+const BEAM_ALPHAS = Object.freeze([1, 0.7, 0.4]);
 function beamBand(z) {
   const i = BEAM_TIERS.findIndex(([dMax]) => z <= dMax);
-  return Math.min(BEAM_FILLS.length - 1, i < 0 ? BEAM_FILLS.length - 1 : i);
+  return Math.min(BEAM_ALPHAS.length - 1, i < 0 ? BEAM_ALPHAS.length - 1 : i);
 }
 
 function drawBeam(ctx, w, h, dpr) {
@@ -645,25 +643,20 @@ function drawBeam(ctx, w, h, dpr) {
   const pts = [];
   for (let i = 0; i <= BEAM_SEGMENTS; i++) {
     const f = i / BEAM_SEGMENTS;
-    const [x, y] = projectCross(w, h, f * reach / MU, X, Y + BEAM_NOSE_UP * (1 - f));
-    pts.push([x, y, (BEAM_W_NOSE + (BEAM_W_TIP - BEAM_W_NOSE) * f) * dpr / 2]);
+    pts.push(projectCross(w, h, f * reach / MU, X, Y)); // R43.3: z = 0 base sits on the ship
   }
-  const [tx, ty] = pts[BEAM_SEGMENTS];
-  ctx.beginPath(); ctx.arc(tx, ty, BEAM_GLOW_R * dpr, 0, Math.PI * 2);
-  ctx.fillStyle = BEAM_GLOW;
-  ctx.fill();
-  ctx.lineWidth = 0.5 * dpr;
+  const tip = pts[BEAM_SEGMENTS];
+  ctx.globalAlpha = 1; ctx.lineCap = 'round';
+  ctx.strokeStyle = BEAM_GLOW; ctx.lineWidth = 7 * dpr; // glow pass under the core (R43.2)
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); ctx.lineTo(tip[0], tip[1]); ctx.stroke();
+  ctx.strokeStyle = BEAM_CORE; ctx.lineWidth = 3 * dpr; // core, 12 per-segment strokes
   for (let i = 0; i < BEAM_SEGMENTS; i++) {
-    const [x0, y0, r0] = pts[i], [x1, y1, r1] = pts[i + 1];
-    const len = Math.hypot(x1 - x0, y1 - y0);
-    const nx = len > 1e-6 ? -(y1 - y0) / len : 1, ny = len > 1e-6 ? (x1 - x0) / len : 0;
-    ctx.beginPath();
-    ctx.moveTo(x0 + nx * r0, y0 + ny * r0); ctx.lineTo(x1 + nx * r1, y1 + ny * r1);
-    ctx.lineTo(x1 - nx * r1, y1 - ny * r1); ctx.lineTo(x0 - nx * r0, y0 - ny * r0); ctx.closePath();
-    const style = BEAM_FILLS[beamBand((i + 0.5) / BEAM_SEGMENTS * reach)];
-    ctx.fillStyle = style; ctx.fill();
-    ctx.strokeStyle = style; ctx.stroke();
+    ctx.globalAlpha = BEAM_ALPHAS[beamBand((i + 0.5) / BEAM_SEGMENTS * reach)];
+    ctx.beginPath(); ctx.moveTo(pts[i][0], pts[i][1]); ctx.lineTo(pts[i + 1][0], pts[i + 1][1]); ctx.stroke();
   }
+  ctx.globalAlpha = 1; ctx.fillStyle = BEAM_CORE; // tip spark at the live reach end
+  ctx.beginPath(); ctx.arc(tip[0], tip[1], 3 * dpr, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
 }
 
 function drawPickups() {
