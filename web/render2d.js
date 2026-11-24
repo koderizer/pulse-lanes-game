@@ -13,6 +13,10 @@ const SHAPE_COLORS = ['#9e8c80', '#8c99ad', '#b3806b', '#80766b', '#998f7a', '#7
 const SIDES = [6, 5, 4, 8, 7, 9, 4, 0];
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const lerp = (a, b, t) => a + (b - a) * t;
+// R41.4: destruction burst radius multiplier by hit strength 1 / 2 / 3 (unknown strength counts
+// as 1; above 3 counts as 3, so the largest burst stays under 2.0x the base radius).
+const BURST_STRENGTH_SCALE = Object.freeze([0.7, 1.0, 1.4]);
+const burstScale = strength => BURST_STRENGTH_SCALE[clamp(Number.isFinite(strength) ? Math.round(strength) : 1, 1, 3) - 1];
 
 // Shared projection helper (R39.3.1): the cross-section pinhole of draw() (frame centre
 // (w / 2, 0.54 h), ship-plane disc radius min(0.46 w, 0.44 h) = TUBE_R, scale
@@ -59,7 +63,7 @@ export function createRenderer2d(opts = {}) {
     for (const [id, e] of live) {
       if (seen.has(id) || e.passing) continue;
       if (e.row[3] < p) e.passing = true;
-      else { if (e.screen) bursts.push({...e.screen, life: 0, max: 0.45, color: '255,190,110'}); live.delete(id); }
+      else { if (e.screen) bursts.push({...e.screen, r: e.screen.r * burstScale(e.strength), life: 0, max: 0.45, color: '255,190,110'}); live.delete(id); }
     }
     rocketPrev = rocketCur;
     rocketCur = new Map((view.rockets ?? []).map(r => [r[0], r]));
@@ -67,6 +71,20 @@ export function createRenderer2d(opts = {}) {
       lastProcessed = curr.processed;
       if (curr.fire_ready !== lastFireReady && curr.fire_ready > prev.fire_ready) beam = 1;
       lastFireReady = curr.fire_ready;
+    }
+  }
+
+  // R41.4 (spec 27.4.3) burst strength: the hp the last hit removed, hp_before - hp_left, from the
+  // [t, 5, id, hp_left] hit events app.js hands in before the next draw. hp_before is the last seen
+  // hp of that id: an earlier hit in the same batch, else the hp column of the view rows (e.hp).
+  function noteHits(events) {
+    const seen = new Map();
+    for (const ev of events ?? []) {
+      if (!Array.isArray(ev) || ev[1] !== 5 || ev.length !== 4) continue;
+      const [, , id, hpLeft] = ev, e = live.get(id);
+      if (!e || !Number.isFinite(hpLeft)) continue;
+      e.strength = (seen.has(id) ? seen.get(id) : e.hp) - hpLeft;
+      seen.set(id, hpLeft);
     }
   }
 
@@ -269,6 +287,7 @@ export function createRenderer2d(opts = {}) {
     setSpawnZ(z) { if (Number.isFinite(z) && z > 0) spawnZ = z; },
     visibleDepthMu: () => Math.max(spawnZ, observedZ) + 20 * MU,
     onContextLost() {},
+    noteHits,
     draw,
     dispose() {},
   };

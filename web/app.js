@@ -3,7 +3,7 @@
 // New runs play pl-v3 (spec 21, ruling R35) in the lobby mode; the pl-v2 module stays for the
 // lobby backdrop, the shared tunnel geometry and a legacy (v1 challenge) pl-v2 run path.
 import {createGame, TICKS_PER_SECOND, MAX_TICKS, WEAPONS} from '../src/sim/space_racer.js';
-import {createGame as createGameV3, loopCourse, loopStart, MINERAL_NORMAL, MODES, MODE_TICKS, validateInputs as validateInputsV3} from '../src/sim/space_racer_v3.js';
+import {createGame as createGameV3, loopCourse, loopStart, BEAM_TIERS, MINERAL_NORMAL, MODES, MODE_TICKS, validateInputs as validateInputsV3} from '../src/sim/space_racer_v3.js';
 import {newSave, importSave, exportSave, STORAGE_KEY} from '../src/state/pilot_state.js';
 import {quantizeStick, keyboardStick, MAX_RADIUS_PX, CAPTURE_RADIUS_PX} from '../src/input/controls.js';
 import {digest} from './digest.js';
@@ -38,7 +38,10 @@ const sfx = new Sfx(music);
 let save = null, session = null, game = null, map = null, course = [], view = EMPTY_VIEW;
 let prevState = null, currState = null, hudState = null, lastRun = null, lastSeed = null, seed = randomSeed();
 let running = false, recorded = false, accumulator = 0, previousFrame = null, lastActive = Date.now();
-let hops = [], fires = 0, boosts = 0, lastSent = [0, 0];
+// Spec 27.4.1 / R41.3: fire is a LEVEL (fireHeld 0 or 1), not a tap queue. lastSent keeps the
+// last entry's [sx, sy, fire level]; the level persists in the sim without entries (27.1.1).
+// fireTap / fireRepress: pending edges kept for the next tick (holdFire / liftFire below).
+let hops = [], fireHeld = 0, fireTap = false, fireRepress = false, firePointer = null, boosts = 0, lastSent = [0, 0, 0];
 // pl-v3 run plumbing (spec 21). runRuleset picks the button range: bit3 boost exists only for
 // pl-v3 (buttons 0..15); a pl-v2 run keeps 0..7. scoreMap is the base pl-map-1 (HUD tempo, score
 // voice); `map` is what the renderer draws, for pl-v3 the base loops repeated per cycle (R35.4,
@@ -141,7 +144,7 @@ function recordRun() {
 
 function stopRun() {
   recordRun();
-  running = false; hops = []; fires = 0; boosts = 0; accumulator = 0; previousFrame = null;
+  running = false; hops = []; releaseFire(); boosts = 0; accumulator = 0; previousFrame = null;
   pause.runEnded();
   music.quiet();
 }
@@ -390,7 +393,7 @@ function start(nextSeed) {
   }
   prevState = currState = game.state(); view = game.view();
   trail = [{p: currState.processed, state: currState, view}];
-  recorded = false; running = true; hops = []; fires = 0; boosts = 0; runBoosts = 0; lastSent = [0, 0];
+  recorded = false; running = true; hops = []; releaseFire(); boosts = 0; runBoosts = 0; lastSent = [0, 0, 0];
   accumulator = 0; previousFrame = null; eventCursor = 0;
   setRocketLatch(false); // a run starts on the laser (ammo starts at 0)
   music.reset(); voice.setMap(scoreMap);
@@ -453,10 +456,26 @@ function press(kind) {
   music.gesture();
   if (!running || pause.isPaused() || document.hidden) return;
   const t = game.state().processed;
-  if (kind === 'fire') fires++;
+  if (kind === 'fire') holdFire(); // level rises; liftFire() drops it (R41.3)
   else if (kind === 'boost') { if (runRuleset === 'pl-v3') boosts++; } // bit3 exists in pl-v3 only
   else hops.push({dir: kind, tick: t});
 }
+// R41.3 edge keeping: the sim only sees the level on ticks, so an edge that is undone before the
+// next tick (tap inside one tick, or release and re-press inside one tick) would be lost. A press
+// whose release is not sent yet re-raises after that release goes out (fireRepress); a release
+// whose press is not sent yet drops after that press goes out (fireTap). tickOnce applies them.
+function holdFire() {
+  if (fireHeld === 0 && lastSent[2] === 1) fireRepress = true;
+  else { fireHeld = 1; fireTap = false; }
+}
+// Soft release (Space keyup, fire pointerup / pointercancel, the a11y tap).
+function liftFire() {
+  firePointer = null; fireRepress = false;
+  if (fireHeld === 1 && lastSent[2] === 0) fireTap = true;
+  else fireHeld = 0;
+}
+// Hard reset (blur, run start and stop): level 0 now, no pending edges.
+function releaseFire() { fireHeld = 0; fireTap = false; fireRepress = false; firePointer = null; }
 function takeHop(t) {
   let best = -1;
   for (let i = 0; i < hops.length; i++) {
@@ -486,8 +505,10 @@ function pickupTier(kind, amount) {
 function voiceEvents(prev, curr) {
   if (!(curr.fire_ready > prev.fire_ready || curr.destroyed > prev.destroyed)) return;
   const events = game.trace().events;
+  const hits = [];
   for (let i = eventCursor; i < events.length; i++) {
     const e = events[i];
+    if (e[1] === 5 && e.length === 4) hits.push(e); // [t, 5, id, hp_left] hit (R41.4 burst strength)
     if (e[1] === 3 && e.length === 4) sfx.fire(e[2]);
     else if (e[1] === 6 && e.length >= 4) {
       const [, , , , pickupKind, amount] = e;
@@ -495,6 +516,8 @@ function voiceEvents(prev, curr) {
     }
   }
   eventCursor = events.length;
+  // Before the next draw syncs the new view, so the renderer still holds each rock's prior hp.
+  if (hits.length) renderer?.noteHits?.(hits);
 }
 function tickOnce() {
   const t = game.state().processed;
@@ -502,17 +525,21 @@ function tickOnce() {
   let buttons = 0;
   const hop = takeHop(t);
   if (hop) buttons |= hop === 'left' ? 1 : 2;
-  if (fires > 0) { fires--; buttons |= 4; }
-  // Spec 21.1: bit3 boost, an edge press like fire (one per tick, extras queue). pl-v2 stays 0..7.
+  // Spec 27.1.1 / R41.3: bit2 is the fire LEVEL, carried on every entry; a held level alone sends
+  // no further entries (the sim persists it), only a level change does (lastSent gate).
+  if (fireHeld) buttons |= 4;
+  // Spec 21.1: bit3 boost, an edge press (one per tick, extras queue). pl-v2 stays 0..7.
   if (boosts > 0) { boosts--; if (runRuleset === 'pl-v3') buttons |= 8; }
   // Spec 26.2.1: bit4 on every pl-v3 entry while the rocket latch is on (an entry every tick).
   if (rocketLatch && v3 && ROCKET_BIT) buttons |= 16;
   const stick = currentStick();
   const entries = [];
-  if (buttons || stick[0] !== lastSent[0] || stick[1] !== lastSent[1]) {
+  if ((buttons & ~4) || fireHeld !== lastSent[2] || stick[0] !== lastSent[0] || stick[1] !== lastSent[1]) {
     entries.push([t, buttons, stick[0], stick[1]]);
-    lastSent = [stick[0], stick[1]];
+    lastSent = [stick[0], stick[1], fireHeld];
   }
+  if (fireTap) { fireTap = false; fireHeld = 0; } // the press went out; the next tick sends the release
+  else if (fireRepress) { fireRepress = false; fireHeld = 1; } // the release went out; re-raise next tick
   prevState = currState;
   currState = game.step(1, entries);
   if (v3) {
@@ -586,6 +613,59 @@ function pickupTicksLeft(e, p) {
   return row ? row[3] - p : NaN;
 }
 
+// ------------------------------------------------------------------ laser ray (spec 27.4.2, R41.1/R41.2)
+// Drawn on the pickup overlay before the pickups, only while the run is active and the sim reports
+// an open beam (state().beam_hold === 1). BEAM_SEGMENTS segments run from the ship nose along the
+// aim axis to state().beam_reach mu, projected with projectCross like the pickups. Each segment is
+// one filled trapezoid (core width 4 px at the nose to 1 px at the tip) plus its outline stroke.
+const BEAM_SEGMENTS = 12;
+// Pinned cyan family (R41.2): near / mid / far fills by the BEAM_TIERS depth band a segment's
+// middle sits in (visual echo of the 3 / 2 / 1 damage decay), and the tip glow.
+const BEAM_FILLS = Object.freeze(['rgba(77,232,255,1)', 'rgba(77,232,255,0.7)', 'rgba(77,232,255,0.4)']);
+const BEAM_GLOW = 'rgba(77,232,255,0.15)';
+const BEAM_W_NOSE = 4, BEAM_W_TIP = 1, BEAM_GLOW_R = 6; // CSS px; 27.4.2 allows a 3 to 5 px core
+// World units the nose sits above the aim point: render2d's ship sprite tip (SHIP_R 8 * 1.3). The
+// ray converges onto the aim column at its reach end, where the sim's hits happen.
+const BEAM_NOSE_UP = 8 * 1.3;
+function beamBand(z) {
+  const i = BEAM_TIERS.findIndex(([dMax]) => z <= dMax);
+  return Math.min(BEAM_FILLS.length - 1, i < 0 ? BEAM_FILLS.length - 1 : i);
+}
+
+function drawBeam(ctx, w, h, dpr) {
+  const s = currState;
+  if (!(running && s?.status === 'running' && s.beam_hold === 1)) return;
+  const reach = Number(s.beam_reach);
+  if (!(reach > 0)) return;
+  // Aim point (interpolated like the renderers' ship). The beam row is the ship's own lane, so the
+  // lane term of the pickup form x / MU + (lane - shipLane) * LANE_SPACING is zero here.
+  const a = Math.min(1, Math.max(0, accumulator / TICK_MS)), from = prevState?.position ?? s.position;
+  const X = (from[0] + (s.position[0] - from[0]) * a) / MU;
+  const Y = (from[1] + (s.position[1] - from[1]) * a) / MU;
+  const pts = [];
+  for (let i = 0; i <= BEAM_SEGMENTS; i++) {
+    const f = i / BEAM_SEGMENTS;
+    const [x, y] = projectCross(w, h, f * reach / MU, X, Y + BEAM_NOSE_UP * (1 - f));
+    pts.push([x, y, (BEAM_W_NOSE + (BEAM_W_TIP - BEAM_W_NOSE) * f) * dpr / 2]);
+  }
+  const [tx, ty] = pts[BEAM_SEGMENTS];
+  ctx.beginPath(); ctx.arc(tx, ty, BEAM_GLOW_R * dpr, 0, Math.PI * 2);
+  ctx.fillStyle = BEAM_GLOW;
+  ctx.fill();
+  ctx.lineWidth = 0.5 * dpr;
+  for (let i = 0; i < BEAM_SEGMENTS; i++) {
+    const [x0, y0, r0] = pts[i], [x1, y1, r1] = pts[i + 1];
+    const len = Math.hypot(x1 - x0, y1 - y0);
+    const nx = len > 1e-6 ? -(y1 - y0) / len : 1, ny = len > 1e-6 ? (x1 - x0) / len : 0;
+    ctx.beginPath();
+    ctx.moveTo(x0 + nx * r0, y0 + ny * r0); ctx.lineTo(x1 + nx * r1, y1 + ny * r1);
+    ctx.lineTo(x1 - nx * r1, y1 - ny * r1); ctx.lineTo(x0 - nx * r0, y0 - ny * r0); ctx.closePath();
+    const style = BEAM_FILLS[beamBand((i + 0.5) / BEAM_SEGMENTS * reach)];
+    ctx.fillStyle = style; ctx.fill();
+    ctx.strokeStyle = style; ctx.stroke();
+  }
+}
+
 function drawPickups() {
   if (!pickupCtx) return;
   const ctx = pickupCtx;
@@ -600,6 +680,7 @@ function drawPickups() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, w, h);
   pickupDirty = true;
+  drawBeam(ctx, w, h, dpr); // R41.1: the ray first, so minerals paint over it
   const list = view?.pickups;
   if (!Array.isArray(list) || list.length === 0) return;
   const p = currState.processed, shipLane = currState.lane;
@@ -691,11 +772,19 @@ document.addEventListener('pointermove', event => { if (event.pointerId === stic
 for (const type of ['pointerup', 'pointercancel']) document.addEventListener(type, event => { if (event.pointerId === stickPointer) releaseStick(); });
 // R-2 (R35.9): the round boost button (charge ring) joins the cluster; hud.js paints its state.
 buildControls(document);
-for (const [id, kind] of [['hop-left', 'left'], ['hop-right', 'right'], ['fire', 'fire'], ['boost', 'boost']]) {
+for (const [id, kind] of [['hop-left', 'left'], ['hop-right', 'right'], ['boost', 'boost']]) {
   const button = $(id);
   button.addEventListener('pointerdown', event => { event.preventDefault(); press(kind); });
   button.addEventListener('click', event => { if (event.detail === 0) press(kind); }); // keyboard activation only
 }
+// R41.3: the fire button drives the fire LEVEL: pointerdown holds, pointerup / pointercancel of the
+// same pointer releases (also when it lifts off the button, via the document listener below).
+const fireButton = $('fire');
+fireButton.addEventListener('pointerdown', event => { event.preventDefault(); press('fire'); firePointer = event.pointerId; });
+for (const type of ['pointerup', 'pointercancel']) fireButton.addEventListener(type, () => liftFire());
+// Keyboard activation only: a tap (press, then release; the release goes out one tick later).
+fireButton.addEventListener('click', event => { if (event.detail === 0) { press('fire'); liftFire(); } });
+for (const type of ['pointerup', 'pointercancel']) document.addEventListener(type, event => { if (firePointer !== null && event.pointerId === firePointer) liftFire(); });
 // Ammo badge = mobile rocket-latch toggle (spec 26.2.3), same press pattern as the cluster buttons.
 const ammoBadge = $('hud-ammo');
 if (ammoBadge) {
@@ -712,14 +801,17 @@ document.addEventListener('keydown', event => {
   if (STICK_KEYS[event.code]) { held[STICK_KEYS[event.code]] = true; return; }
   if (event.repeat) return;
   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); press(event.key === 'ArrowLeft' ? 'left' : 'right'); }
-  else if (event.code === 'Space') { event.preventDefault(); press('fire'); }
+  else if (event.code === 'Space') { event.preventDefault(); press('fire'); } // level 1 until keyup (R41.3)
   else if (event.code === 'KeyB' || event.key === 'b' || event.key === 'B') { event.preventDefault(); press('boost'); }
   else if (event.ctrlKey || event.metaKey || event.altKey) return; // browser shortcuts (reload, close tab) stay theirs
   else if (PRESS_KEYS[event.code]) { event.preventDefault(); press(PRESS_KEYS[event.code]); }
   else if (event.code === 'KeyR') { event.preventDefault(); toggleRocketLatch(); }
 });
-document.addEventListener('keyup', event => { if (STICK_KEYS[event.code]) held[STICK_KEYS[event.code]] = false; });
-window.addEventListener('blur', () => { for (const k of Object.keys(held)) held[k] = false; releaseStick(); });
+document.addEventListener('keyup', event => {
+  if (STICK_KEYS[event.code]) held[STICK_KEYS[event.code]] = false;
+  if (event.code === 'Space') liftFire(); // R41.3: keyup drops the fire level (never gated)
+});
+window.addEventListener('blur', () => { for (const k of Object.keys(held)) held[k] = false; releaseStick(); releaseFire(); });
 
 // ------------------------------------------------------------------ lobby buttons and save management
 function download(filename, content, type = 'application/json') {

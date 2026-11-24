@@ -54,6 +54,22 @@ export const WEAPONS = Object.freeze({
     cooldown_ticks: 45, damage: 4, range_z: 360000, half_width: 6000, speed: 8000}),
 });
 
+// NOTE 34 (spec 27.2.3 + 27.6, rulings R40.1/R40.2 + R42.1): the pl-v3 laser beam law lives in
+// these exports; WEAPONS above is byte-frozen. NOTE 35 (27.2.2/27.2.5): reach and tier damage
+// helpers are module-private; BEAM_TIERS is pinned law (first row with d <= d_max gives the
+// damage). R42 (owner playtest): R_MAX 2x (full extension 20 ticks) and tiers 2/1/1 so big
+// rocks need multiple passes.
+export const BEAM_V_EXT = 48000;
+export const BEAM_R_MAX = 960000;
+export const BEAM_HALF_WIDTH = 3000;
+export const BEAM_TIERS = Object.freeze([
+  Object.freeze([160000, 2]), Object.freeze([320000, 1]), Object.freeze([BEAM_R_MAX, 1])]);
+function beamReach(t0, t) { return Math.min(BEAM_R_MAX, BEAM_V_EXT * (t - t0 + 1)); }
+function beamDamage(d) {
+  for (const [dMax, damage] of BEAM_TIERS) if (d <= dMax) return damage;
+  return 1;
+}
+
 // ------------------------------------------------------------ pl-v2 constants (section 2), private
 // NOTE 25 (R38.2): the pl-v2 song bar weapon column (laser, rocket, laser) is not carried by
 // pl-v3 at all; base loops keep no weapon field, so no pl-v3 path can fire from it.
@@ -431,6 +447,7 @@ export function createGame(seed, mode) {
   let charge = CHARGE_START, ammo = AMMO_START, boostUntil = 0;
   let hopReady = 0, fireReady = 0, shots = 0, dodged = 0, destroyed = 0, distance = 0;
   let lastWeapon = 'laser'; // NOTE 28 (26.2.3): weapon id of the most recent accepted fire
+  let fireLevel = 0, beam = null; // NOTE 36 (27.1.1, 27.2.2): fire level state; open beam {t0, reach, hit} or null
   let rockets = []; // [id, lane, x, y, z, weapon]
   let reason = null, terminal = null;
   const events = [];
@@ -574,7 +591,38 @@ export function createGame(seed, mode) {
     // NOTE 24 (26.2.2): the weapon of this tick is the player's: rocket while bit4 is set, else laser.
     const weapon = (buttons & ROCKET_SELECT) ? WEAPONS.rocket : WEAPONS.laser;
     doHop(t, buttons, base.lanes.length);
-    if (buttons & 4) doFire(t, weapon);
+    // fire (spec 27.1/27.2, NOTE 36 to NOTE 38): bit2 is a LEVEL set by accepted entries;
+    // without an entry the level persists; release closes the beam; only a rising edge fires
+    // (NOTE 7/NOTE 24 unchanged on the edge: weapon by the edge entry's bit4, shared cooldown,
+    // refusal order, held level never re-fires or refuses). The laser opens a beam; the old
+    // hitscan path (doFire below) is no longer reached by pl-v3 fire.
+    const wasLevel = fireLevel;
+    if (entry !== null) fireLevel = (buttons & 4) ? 1 : 0;
+    if (fireLevel === 0) beam = null;
+    if (fireLevel === 1 && wasLevel === 0) {
+      if (t < fireReady) { events.push([t, 4, 3, weapon.code]); }
+      else if (ammo < weapon.ammo_cost) { events.push([t, 6, 2]); }
+      else {
+        ammo -= weapon.ammo_cost;
+        shots++;
+        lastWeapon = weapon.id;
+        events.push([t, 3, weapon.code, shots]);
+        fireReady = t + weapon.cooldown_ticks;
+        // NOTE 37 (27.2.1): the laser opens a beam (new hit set) at t0 = t; the rocket is unchanged.
+        if (weapon.id === 'laser') beam = {t0: t, reach: 0, hit: new Set()};
+        else rockets.push([shots, lane, x, y, 0, weapon]);
+      }
+    }
+    // beam step (NOTE 38, 27.2.2 to 27.2.6): every open tick, reach grows; each live rock with
+    // 0 < z <= reach in the aim column not yet hit by this beam is hit once, (z asc, id asc),
+    // for beamDamage(z) hit points (drop and guarantee logic unchanged via damage()).
+    if (beam) {
+      beam.reach = beamReach(beam.t0, t);
+      const due = targetsIn(lane, t, x, y, BEAM_HALF_WIDTH)
+        .filter(c => c.z > 0 && c.z <= beam.reach && !beam.hit.has(c.r[0]));
+      due.sort((a, c) => a.z - c.z || a.r[0] - c.r[0]);
+      for (const c of due) { beam.hit.add(c.r[0]); damage(c.r, beamDamage(c.z), t, WEAPONS.laser.code); }
+    }
     if (buttons & 8) doBoost(t);
     doMove(t, L, base);
     doRockets(t);
@@ -615,7 +663,9 @@ export function createGame(seed, mode) {
       return {ammo, boost_until: boostUntil, charge, destroyed, distance, dodged, fire_ready: fireReady,
         hop_ready: hopReady, lane, lane_count: base.lanes.length, loop: L, mode, position: [x, y], processed,
         ruleset_id: RULESET_ID, score: distance, seed, status: reason === null ? 'running' : 'ended',
-        terminal_reason: reason, terminal_tick: terminal, velocity: [vx, vy], weapon: lastWeapon}; // NOTE 28
+        terminal_reason: reason, terminal_tick: terminal, velocity: [vx, vy], weapon: lastWeapon,
+        // NOTE 39 (27.3.1, R40.4): beam state for the renderer; all previous keys unchanged.
+        beam_hold: beam === null ? 0 : 1, beam_reach: beam === null ? 0 : beam.reach}; // NOTE 28
     },
     // View for the next tick p (NOTE 6, NOTE 11).
     view() {
