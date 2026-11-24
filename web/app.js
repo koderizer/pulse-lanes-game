@@ -649,8 +649,8 @@ function drawBeam(ctx, w, h, dpr) {
   const cxOff = (s.lane - 0.5) * w * 0.6;
   for (let i = 0; i <= BEAM_SEGMENTS; i++) {
     const f = i / BEAM_SEGMENTS;
-    const [px, py] = projectCross(w, h, f * reach / MU, X, Y); // offsets from the frame centre
-    pts.push([px - w / 2 + cxOff, py]); // R43.3: z = 0 base sits on the ship
+    const [px, py] = projectCross(w, h, f * reach / MU, X, Y); // already carries w/2 frame centre
+    pts.push([px + cxOff, py]); // R43.3: z = 0 base sits on the ship (curve term added)
   }
   const tip = pts[BEAM_SEGMENTS];
   ctx.globalAlpha = 1; ctx.lineCap = 'round';
