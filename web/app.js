@@ -641,9 +641,16 @@ function drawBeam(ctx, w, h, dpr) {
   const X = (from[0] + (s.position[0] - from[0]) * a) / MU;
   const Y = (from[1] + (s.position[1] - from[1]) * a) / MU;
   const pts = [];
+  // R43.3 anchor, corrected after live QA: the overlay shares the game canvas frame, whose centre
+  // carries the curve term (render2d draw(): cx = w/2 + (lane - laneF) * w * 0.6). laneF is the
+  // frame's smoothed lane, unknown to the overlay; the midpoint 0.5 keeps the base error bounded by
+  // +/- 0.3 w between keyframes and exact at lane rest. Without this term the beam detaches while
+  // steering (the float the owner saw).
+  const cxOff = (s.lane - 0.5) * w * 0.6;
   for (let i = 0; i <= BEAM_SEGMENTS; i++) {
     const f = i / BEAM_SEGMENTS;
-    pts.push(projectCross(w, h, f * reach / MU, X, Y)); // R43.3: z = 0 base sits on the ship
+    const [px, py] = projectCross(w, h, f * reach / MU, X, Y); // offsets from the frame centre
+    pts.push([px - w / 2 + cxOff, py]); // R43.3: z = 0 base sits on the ship
   }
   const tip = pts[BEAM_SEGMENTS];
   ctx.globalAlpha = 1; ctx.lineCap = 'round';
