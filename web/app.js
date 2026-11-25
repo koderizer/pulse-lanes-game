@@ -223,8 +223,13 @@ function chooseShip(id) {
 }
 function renderShipStats() {
   const s = shipStats(shipId);
-  const name = $('ship-current');
-  if (name) name.textContent = `${s.name} · ${s.blurb}`;
+  const head = $('ship-current');
+  if (head) {
+    const nameEl = head.querySelector('.readout-name');
+    const tagEl = head.querySelector('.readout-tag');
+    if (nameEl) nameEl.textContent = s.name;
+    if (tagEl) tagEl.textContent = s.blurb;
+  }
   for (const [, id] of STAT_ROWS) { const o = $(id); if (o) o.textContent = s.values[id]; }
 }
 function buildShipPicker() {
@@ -255,14 +260,18 @@ function buildShipPicker() {
     shipButtons.push(b);
     section.append(b);
   }
-  // R50.2: the ship block is the lobby's main section: buttons plus the selected ship's stats,
-  // every value read from its law source (sim constants / registry), never hard-coded here.
+  // R50.2 / R51: ship buttons only in the strip; the stats readout is a lobby sibling below it.
   const stats = document.createElement('div');
   stats.className = 'ship-stats';
   stats.id = 'ship-stats';
   const nm = document.createElement('h3');
-  nm.className = 'ship-current';
+  nm.className = 'readout-head';
   nm.id = 'ship-current';
+  const nameSpan = document.createElement('span');
+  nameSpan.className = 'readout-name';
+  const tagSpan = document.createElement('span');
+  tagSpan.className = 'readout-tag';
+  nm.append(nameSpan, tagSpan);
   stats.append(nm);
   for (const [label, id] of STAT_ROWS) {
     const row = document.createElement('div');
@@ -271,12 +280,13 @@ function buildShipPicker() {
     k.className = 'k';
     k.textContent = label;
     const o = document.createElement('output');
+    o.className = 'val';
     o.id = id;
     row.append(k, o);
     stats.append(row);
   }
-  section.append(stats);
   lobby.querySelector('.launch').after(section);
+  section.after(stats);
   showShip();
   renderShipStats();
 }
@@ -352,6 +362,15 @@ function buildLobbyV2() {
     gear.addEventListener('click', openSettings);
     vault.after(gear);
     vault.remove();
+  }
+  // R51: DOM order drives layout (CSS order is a no-op here). Modes above ships; stats below ships.
+  const ships = lobby.querySelector('.ships');
+  const modes = lobby.querySelector('.modes');
+  const statsPanel = $('ship-stats');
+  if (modes && ships) ships.before(modes);
+  if (statsPanel && ships) {
+    if (statsPanel.parentElement === ships) statsPanel.remove();
+    if (statsPanel.previousElementSibling !== ships) ships.after(statsPanel);
   }
 }
 

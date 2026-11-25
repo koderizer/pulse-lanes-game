@@ -403,12 +403,23 @@ body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *:
 #seed.serial { font: 500 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-dim, #8b93b0);
   letter-spacing: .04em; margin: 0 0 0 10px; align-self: center; opacity: .85; }
 .launch { position: relative; }
-.ships { order: -1; }
-.ship-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; margin: 10px 2px 2px; }
-.ship-stats .ship-current { grid-column: 1 / -1; margin: 4px 0 2px; font-size: 13px; letter-spacing: .12em; color: var(--ink, #e8ecff); }
-.ship-stats .stat { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px solid rgba(140, 150, 190, .14); padding: 3px 0; }
-.ship-stats .stat .k { font-size: 10px; text-transform: uppercase; letter-spacing: .14em; color: var(--ink-dim, #8b93b0); }
-.ship-stats .stat output { font: 600 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink, #e8ecff); }
+/* R51: ship diagnostic readout (sibling below the ship strip, not inside the scroll row). */
+#ship-stats.ship-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; width: 100%; margin: 4px 0 14px; padding: 10px 14px;
+  border: 1px solid rgba(105, 226, 211, .4); border-radius: 12px;
+  background: rgba(11, 15, 32, .72);
+  box-shadow: 0 0 14px rgba(105, 226, 211, .2), inset 0 0 22px rgba(105, 226, 211, .06); }
+#ship-stats .readout-head { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; margin: 0 0 6px; }
+#ship-stats .readout-name { font: 800 12px/1.3 var(--mono); text-transform: uppercase; letter-spacing: .18em; color: var(--cyan);
+  text-shadow: 0 0 10px rgba(105, 226, 211, .55), 0 0 22px rgba(105, 226, 211, .25); }
+#ship-stats .readout-tag { font: 600 10px/1.4 var(--mono); letter-spacing: .08em; color: #8e9ab9; text-transform: uppercase; }
+#ship-stats .stat { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; min-width: 0;
+  padding: 4px 0; border-bottom: 1px solid rgba(105, 226, 211, .12); }
+#ship-stats .stat .k { flex: none; font-size: 9px; text-transform: uppercase; letter-spacing: .1em; color: #8e9ab9; }
+#ship-stats .stat .val { min-width: 0; font: 600 12px/1.35 var(--mono); font-variant-numeric: tabular-nums; color: #e8ecff;
+  text-shadow: 0 0 8px rgba(105, 226, 211, .18); text-align: right; }
+@media (max-width: 420px) {
+  #ship-stats.ship-stats { max-height: 180px; overflow: hidden; }
+}
 #game-settings { width: 100%; margin-top: 6px; }
 #settings-dialog { border: 1px solid rgba(140, 150, 190, .35); border-radius: 14px; background: #0b0e1d; color: var(--ink, #e8ecff);
   padding: 18px 18px 14px; min-width: min(320px, 86vw); }
@@ -417,3 +428,15 @@ body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *:
 #settings-dialog .settings-row { display: flex; gap: 8px; margin: 6px 0; }
 #settings-dialog .settings-row > * { flex: 1; }
 #settings-done { margin-top: 10px; width: 100%; }
+
+/* R51.1 phone polish: launch row wraps, seed serial sits on its own line, hull fits one line,
+   readout labels raised to the standard secondary ink (contrast). */
+#lobby .launch{flex-wrap:wrap}
+#lobby .launch>.icon,#lobby .launch>#retry,#lobby .launch>#scan{flex:none}
+#seed.serial{flex-basis:100%;text-align:right;margin-left:auto;padding-top:2px}
+@media (max-width:420px){
+  #lobby #retry,#lobby #scan{width:64px}
+  #ship-stats .stat .val{font-size:11px}
+}
+#ship-stats #stat-hull{white-space:nowrap}
+#ship-stats .readout-tag,#ship-stats .stat .k{color:#a7afc9}
