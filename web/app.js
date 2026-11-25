@@ -544,7 +544,15 @@ function buildChallengeUi() {
   label.textContent = 'Scan';
   b.append(label);
   const launch = lobby.querySelector('.launch');
-  launch.append(b);
+  // R51.2: the scanner is a utility, not an action button - it lives in the bottom row with
+  // Game settings. Falls back to the launch row only if the bottom row does not exist.
+  const gear = $('game-settings');
+  if (gear && gear.parentElement) {
+    const row = document.createElement('div');
+    row.className = 'utility-row';
+    gear.after(row);
+    row.append(gear, b);
+  } else launch.append(b);
   challengeBanner = document.createElement('p');
   challengeBanner.className = 'challenge-banner';
   challengeBanner.setAttribute('role', 'status');
