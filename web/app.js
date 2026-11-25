@@ -9,7 +9,9 @@ import {quantizeStick, keyboardStick, MAX_RADIUS_PX, CAPTURE_RADIUS_PX} from '..
 import {digest} from './digest.js';
 import {Music} from './music.js';
 import {ScoreVoice} from './score_voice.js';
-import {Sfx} from './sfx.js';
+import {Sfx, SFX_CODES, tierOf} from './sfx.js';
+import {SongPlayer, SONG_KEY, SONG_LEVEL_KEY, SONG_FAILED_TEXT, songCredit, songIdOrDefault, songLevelOrDefault} from './song.js';
+import {SONGS} from './songs/manifest.js';
 import {renderHud, buildControls, formatKm, MODE_LABELS, paintRocketLatch} from './hud.js';
 import {createPause} from './pause.js';
 import {applySetting, defaultSettings, lastResultText, retryEnabled, SETTING_CONTROLS} from './lobby_model.js';
@@ -35,6 +37,7 @@ const notice = message => { $('notice').textContent = message; };
 const music = new Music();
 const voice = new ScoreVoice(music);
 const sfx = new Sfx(music);
+const song = new SongPlayer(music, {tracks: SONGS});
 let save = null, session = null, game = null, map = null, course = [], view = EMPTY_VIEW;
 let prevState = null, currState = null, hudState = null, lastRun = null, lastSeed = null, seed = randomSeed();
 let running = false, recorded = false, accumulator = 0, previousFrame = null, lastActive = Date.now();
@@ -146,7 +149,7 @@ function stopRun() {
   recordRun();
   running = false; hops = []; releaseFire(); boosts = 0; accumulator = 0; previousFrame = null;
   pause.runEnded();
-  music.quiet();
+  music.quiet(); song.pause();
 }
 
 function endSession() {
@@ -164,6 +167,7 @@ function updateLobby() {
   $('retry').disabled = !retryEnabled({lastSeed});
   $('replay').disabled = !(game && typeof game.replayBytes === 'function' && game.state().status === 'ended' && recorded);
   showRendererKind();
+  showSong();
   const s = settingsNow();
   $('set-music-level').value = String(s.music_level);
   $('set-music-level-value').textContent = String(s.music_level);
@@ -284,6 +288,74 @@ function buildModePicker() {
   showMode();
 }
 
+// Song picker (R46.2.11): one settings tile built here after the music tile (index.html stays
+// unchanged). The choice and level live in their own localStorage keys (pl-song, pl-song-level),
+// never in the pilot save, an export, the challenge preset or the replay. `local` (a file from this
+// device) is never stored: a reload returns to the stored value. Presentation only.
+let songTile = null;
+function storeSong(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* the choice still applies until the page closes */ }
+}
+function loadSongPrefs() {
+  let id = 'synth', level = 5;
+  try { id = songIdOrDefault(localStorage.getItem(SONG_KEY), SONGS); } catch { /* storage unavailable: defaults */ }
+  try { level = songLevelOrDefault(localStorage.getItem(SONG_LEVEL_KEY)); } catch { /* storage unavailable: defaults */ }
+  song.select(id);
+  song.setLevel(level);
+}
+function showSong() {
+  if (!songTile) return;
+  const info = song.inspect();
+  $('set-song').value = info.selection;
+  $('set-song-level').value = String(info.level);
+  $('set-song-level-value').textContent = String(info.level);
+  const track = SONGS.find(t => t.id === info.selection);
+  $('song-credit').textContent = track ? songCredit(track) : info.selection === 'local' ? (song.localFile?.name ?? '') : '';
+  $('song-status').textContent = info.state === 'failed' ? SONG_FAILED_TEXT : '';
+}
+function buildSongTile() {
+  const make = (tag, props = {}, attrs = {}) => {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    Object.assign(node, props);
+    return node;
+  };
+  const tile = make('div', {className: 'tile song'});
+  const label = make('label', {}, {for: 'set-song'});
+  label.append(make('span', {textContent: 'Song'}));
+  const select = make('select', {id: 'set-song'});
+  const options = [['synth', 'Synth score'], ...SONGS.map(t => [t.id, t.title]), ['local', 'From this device...']];
+  for (const [value, text] of options) select.append(make('option', {value, textContent: text}));
+  const file = make('input', {id: 'set-song-file', type: 'file', hidden: true}, {accept: 'audio/*'});
+  const levelLabel = make('label', {}, {for: 'set-song-level'});
+  levelLabel.append(make('span', {textContent: 'Song level'}), make('output', {id: 'set-song-level-value'}));
+  const level = make('input', {id: 'set-song-level', type: 'range'}, {min: '1', max: '10', step: '1'});
+  const credit = make('p', {id: 'song-credit'});
+  const status = make('p', {id: 'song-status'}, {role: 'status'});
+  tile.append(label, select, file, levelLabel, level, credit, status);
+  lobby.querySelector('.tile.music').after(tile);
+  songTile = tile;
+  select.addEventListener('change', event => {
+    const id = event.target.value;
+    if (id === 'local') { song.select('local'); $('set-song-file').click(); }
+    else { song.select(id); storeSong(SONG_KEY, id); }
+    showSong();
+  });
+  file.addEventListener('change', event => {
+    const picked = event.target.files?.[0];
+    if (picked) song.setLocalFile(picked);
+    event.target.value = ''; // the same file can be picked again
+    showSong();
+  });
+  level.addEventListener('input', event => {
+    const n = songLevelOrDefault(String(event.target.value));
+    song.setLevel(n);
+    storeSong(SONG_LEVEL_KEY, String(n));
+    showSong();
+  });
+  showSong();
+}
+
 // Challenge scan (spec 20 QR-3/QR-4, ruling R33). The Scan button, the banner and the scan
 // overlay are built here and in challenge.js, never in index.html. A decoded code presets the
 // lobby through the same paths as manual configuration: changeSetting (persist + music and
@@ -368,7 +440,7 @@ function changeSetting(key, raw) {
   updateLobby();
 }
 $(SETTING_CONTROLS.music_level).addEventListener('input', event => changeSetting('music_level', event.target.value));
-$(SETTING_CONTROLS.mute).addEventListener('change', event => { music.gesture(); changeSetting('mute', event.target.checked); });
+$(SETTING_CONTROLS.mute).addEventListener('change', event => { changeSetting('mute', event.target.checked); music.gesture(); song.gesture(); });
 $(SETTING_CONTROLS.quality).addEventListener('change', event => changeSetting('quality', event.target.value));
 $(SETTING_CONTROLS.reduced_motion).addEventListener('change', event => changeSetting('reduced_motion', event.target.checked));
 
@@ -396,8 +468,8 @@ function start(nextSeed) {
   recorded = false; running = true; hops = []; releaseFire(); boosts = 0; runBoosts = 0; lastSent = [0, 0, 0];
   accumulator = 0; previousFrame = null; eventCursor = 0;
   setRocketLatch(false); // a run starts on the laser (ammo starts at 0)
-  music.reset(); voice.setMap(scoreMap);
-  beginSession(); music.gesture(); persist();
+  music.reset(); song.pause(); voice.setMap(scoreMap);
+  beginSession(); song.startRun(); music.gesture(); song.gesture(); persist();
   renderer.setCourse(map, course);
   if (rendererKind === 'webgl2') shipMirror.setCourse(map); // R44.2: same reset as render.js
   runShip = shipId; renderer.setShip?.(runShip);
@@ -446,15 +518,15 @@ function finishRun() {
 }
 
 const pause = createPause({
-  onPause: () => { accumulator = 0; previousFrame = null; music.quiet(); },
-  onResume: () => { accumulator = 0; previousFrame = null; lastActive = Date.now(); music.gesture(); },
+  onPause: () => { accumulator = 0; previousFrame = null; music.quiet(); song.pause(); },
+  onResume: () => { accumulator = 0; previousFrame = null; lastActive = Date.now(); song.resume(); music.gesture(); song.gesture(); },
   onExit: () => { endSession(); openLobby(); },
 });
 
 // ------------------------------------------------------------------ input sampling (spec 6.4)
 function currentStick() { return stickPointer !== null ? touchStick : keyboardStick(held); }
 function press(kind) {
-  music.gesture();
+  music.gesture(); song.gesture();
   if (!running || pause.isPaused() || document.hidden) return;
   const t = game.state().processed;
   if (kind === 'fire') holdFire(); // level rises; liftFire() drops it (R41.3)
@@ -489,35 +561,63 @@ function setRocketLatch(on) {
   rocketLatch = Boolean(on);
   paintRocketLatch(document, rocketLatch);
 }
-function toggleRocketLatch() { music.gesture(); setRocketLatch(!rocketLatch); }
-// Spec 26.4.1 cue wiring: voice the pl-v3 events produced since the last call. A tick can carry an
-// accepted fire [t, 3, code, shots] only when fire_ready rises and a destroying event only when
-// destroyed rises, so the trace is read on those ticks alone. Refusals [t, 6, 1] / [t, 6, 2] are
-// 3 fields long; the destroying event is [t, 6, id, code, pickup_kind, amount] (R38.4), and a
-// 4-field [t, 6, id, code] from a pre-26.3 sim still voices the explosion.
-// R38.7 (FB3-REV4 E-1): the frozen pl-v3 destroying event encodes the pickup as numeric
-// kind 1 (mineral) / 2 (gem) plus an amount (NOTE 27). sfx.energy speaks tier names, so
-// derive the tier from the shipped tuple here in the bridge (the oracle stays authoritative).
-function pickupTier(kind, amount) {
-  if (kind === 2) return 'gem';
-  if (kind !== 1) return null;
-  return amount >= 50 ? 'mineral_large' : amount >= 25 ? 'mineral_normal' : 'mineral_small';
-}
-function voiceEvents(prev, curr) {
-  if (!(curr.fire_ready > prev.fire_ready || curr.destroyed > prev.destroyed)) return;
-  const events = game.trace().events;
+function toggleRocketLatch() { music.gesture(); song.gesture(); setRocketLatch(!rocketLatch); }
+// Spec 26.4.1 cue wiring, R46 B-1 delta bridge: voice one processed tick from the state rows and
+// view rows app.js already holds, with no game.trace() (its deep copy grows with run length).
+//   fire:  fire_ready rose -> the weapon of the accepted shot (state().weapon, SFX_CODES).
+//   kills: a pickup id in the new view that the previous view lacked is a rock destroyed this tick
+//          (the pickup keeps its rock's id); its row [id, kind, lane, x, y, dt, amount] gives the tier
+//          (R38.7: kind 1 mineral / 2 gem plus an amount, NOTE 27; tierOf in sfx.js).
+//   hits:  an asteroid in both views whose hp (row index 4) dropped is a non-lethal hit.
+// If the new-pickup count disagrees with the sim's destroyed counter, this tick is read from the
+// trace instead (voiceEventsFromTrace) and the probe-visible counter is incremented. Expected 0.
+const bridgeBefore = new Map();
+function voiceDeltas(prev, curr, before, after) {
+  const known = new Set();
+  for (const row of before.pickups ?? []) known.add(row[0]);
+  const born = [];
+  for (const row of after.pickups ?? []) if (!known.has(row[0])) born.push(row);
+  if (born.length !== curr.destroyed - prev.destroyed) {
+    globalThis.__web10BridgeFallbacks = (globalThis.__web10BridgeFallbacks ?? 0) + 1;
+    voiceEventsFromTrace(curr.processed - 1);
+    return;
+  }
+  if (curr.fire_ready > prev.fire_ready) sfx.fire(SFX_CODES[curr.weapon]);
+  const t = curr.processed - 1;
   const hits = [];
-  for (let i = eventCursor; i < events.length; i++) {
+  for (const row of born) {
+    sfx.destroyed(tierOf(row[1], row[6]));
+    hits.push([t, 5, row[0], 0]);
+  }
+  bridgeBefore.clear();
+  for (const row of before.asteroids ?? []) bridgeBefore.set(row[0], row[4]);
+  for (const row of after.asteroids ?? []) {
+    const hp = bridgeBefore.get(row[0]);
+    if (hp !== undefined && row[4] < hp) hits.push([t, 5, row[0], row[4]]);
+  }
+  // Before the next draw syncs the new view, so the renderer still holds each rock's prior hp.
+  if (hits.length) renderer?.noteHits?.(hits);
+}
+// Fallback read of the events of tick t from the trace (the pre-bridge path). The cursor moves to
+// the trace length only here, so the events of earlier bridge ticks are never voiced a second time:
+// the scan starts at the first event of tick t (event[0] is the tick, in nondecreasing order).
+// The destroying event is [t, 6, id, code, pickup_kind, amount] (R38.4); a 4-field [t, 6, id, code]
+// from a pre-26.3 sim still voices the explosion only.
+function voiceEventsFromTrace(t) {
+  const events = game.trace().events;
+  let from = events.length;
+  while (from > eventCursor && events[from - 1][0] >= t) from--;
+  const hits = [];
+  for (let i = from; i < events.length; i++) {
     const e = events[i];
     if (e[1] === 5 && e.length === 4) hits.push(e); // [t, 5, id, hp_left] hit (R41.4 burst strength)
     if (e[1] === 3 && e.length === 4) sfx.fire(e[2]);
     else if (e[1] === 6 && e.length >= 4) {
       const [, , , , pickupKind, amount] = e;
-      sfx.destroyed(e.length === 6 && Number.isInteger(pickupKind) && Number.isInteger(amount) ? pickupTier(pickupKind, amount) : null);
+      sfx.destroyed(e.length === 6 && Number.isInteger(pickupKind) && Number.isInteger(amount) ? tierOf(pickupKind, amount) : null);
     }
   }
   eventCursor = events.length;
-  // Before the next draw syncs the new view, so the renderer still holds each rock's prior hp.
   if (hits.length) renderer?.noteHits?.(hits);
 }
 function tickOnce() {
@@ -542,6 +642,7 @@ function tickOnce() {
   if (fireTap) { fireTap = false; fireHeld = 0; } // the press went out; the next tick sends the release
   else if (fireRepress) { fireRepress = false; fireHeld = 1; } // the release went out; re-raise next tick
   prevState = currState;
+  const viewBefore = view;
   currState = game.step(1, entries);
   if (v3) {
     ensureCourse(currState.loop);
@@ -554,11 +655,10 @@ function tickOnce() {
   lastActive = Date.now();
   // pl-v3 cycles the three base loops (R35.4): music and score voice follow the tick in the cycle.
   const beatTick = v3 ? t % V3_CYCLE_TICKS : t;
-  music.beat(beatTick);
-  voice.beat(beatTick, currState.lane);
+  if (!song.covering()) { music.beat(beatTick); voice.beat(beatTick, currState.lane); } // R46.2.7: an audible song replaces the synth score
   // pl-v3: shot, explosion and energy cues from the sim events (spec 26.4). pl-v2 keeps the W4c
   // R-2 path: a fire_ready rise across tick t is its [t, 3, code, shots] event (read-only rows).
-  if (v3) voiceEvents(prevState, currState);
+  if (v3) voiceDeltas(prevState, currState, viewBefore, view);
   else sfx.tick(prevState, currState, WEAPONS);
   if (currState.status === 'ended') finishRun();
 }
@@ -568,7 +668,7 @@ function tickOnce() {
 // below the HUD and touch controls; the same code path serves both renderer kinds (render.js stays
 // untouched). Created on the run-start path, drawn only while a run is active, cleared every frame,
 // one path fill per tier. Presentation only: it reads view/state/course rows, never inputs.
-const PICKUP_SPRITES = Object.freeze({ // tier (pickupTier names) -> [fill, half-size in CSS px]
+const PICKUP_SPRITES = Object.freeze({ // tier (tierOf names) -> [fill, half-size in CSS px]
   mineral_small: ['rgba(207,239,255,0.45)', 3],
   mineral_normal: ['rgba(207,239,255,0.7)', 4],
   mineral_large: ['rgba(207,239,255,1)', 5],
@@ -1001,7 +1101,7 @@ function drawPickups(now) {
     if (!Array.isArray(e) || e.length < 6) continue;
     const [id, kind, lane, x, y] = e;
     // A 6-field entry (no amount) renders at normal brightness; unknown kinds are not drawn.
-    const tier = pickupTier(kind, e.length >= 7 && Number.isFinite(e[6]) ? e[6] : MINERAL_NORMAL);
+    const tier = tierOf(kind, e.length >= 7 && Number.isFinite(e[6]) ? e[6] : MINERAL_NORMAL);
     const ticks = pickupTicksLeft(e, p);
     if (!tier || !Number.isFinite(ticks) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
     const d = (ticks + lag) * (pickupSpeed.get(id) ?? DEFAULT_ROCK_SPEED) / MU;
@@ -1035,6 +1135,7 @@ function drawPickups(now) {
 
 // ------------------------------------------------------------------ frame loop
 function frame(timestamp) {
+  song.sync({now: timestamp, running, paused: pause.isPaused(), hidden: document.hidden, muted: settingsNow().mute});
   if (running && !pause.isPaused() && !document.hidden) {
     if (previousFrame !== null) accumulator += Math.min(MAX_FRAME_MS, Math.max(0, timestamp - previousFrame));
     previousFrame = timestamp;
@@ -1082,7 +1183,7 @@ function releaseStick() {
 // capture radius, as before) or anywhere on the game canvas. A pointerdown on any button (fire,
 // boost, hops, ammo badge, pause) never captures: those keep their own handlers.
 document.addEventListener('pointerdown', event => {
-  music.gesture();
+  music.gesture(); song.gesture();
   if (!running || stickPointer !== null) return;
   if (event.target?.closest?.('button')) return;
   const [x, y] = stickCentre();
@@ -1179,11 +1280,11 @@ $('reset').onclick = () => {
   persist(); notice('New empty save created.');
 };
 
-document.addEventListener('pointerdown', () => music.gesture(), {once: true});
-document.addEventListener('keydown', () => music.gesture(), {once: true});
+document.addEventListener('pointerdown', () => { music.gesture(); song.gesture(); }, {once: true});
+document.addEventListener('keydown', () => { music.gesture(); song.gesture(); }, {once: true});
 document.addEventListener('visibilitychange', () => {
   previousFrame = null; accumulator = 0;
-  if (document.hidden) { music.quiet(); scanner?.close(); } // a hidden page never keeps the camera open
+  if (document.hidden) { music.quiet(); song.pause(); scanner?.close(); } // a hidden page never keeps the camera open
   else if (session && Date.now() - lastActive >= IDLE_MS) { endSession(); openLobbyUnlessGameOver(); }
 });
 window.addEventListener('pagehide', () => { scanner?.close(); endSession(); });
@@ -1205,6 +1306,8 @@ shipId = runShip = loadShip(); // before the renderer exists, so the first frame
 buildShipPicker();
 modeId = loadMode();
 buildModePicker();
+loadSongPrefs();
+buildSongTile();
 buildChallengeUi();
 initRenderer();
 // Lobby backdrop: the course of the shown seed, cruising without asteroids (presentation only).

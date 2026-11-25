@@ -14,10 +14,19 @@
 // the dropped pickup. Same gate (music.ready()) and the same per-voice teardown as laser/rocket.
 
 export const SFX_CODES = Object.freeze({laser: 1, rocket: 2});
-// Energy ping pitch per pickup tier (spec 26.4.1): rises small -> normal -> large; gem is a
-// distinct two-tone interval (a rising fourth on a higher base) instead of a single ping.
-export const ENERGY_TIERS = Object.freeze({mineral_small: 1, mineral_normal: 1.25, mineral_large: 1.55});
-export const GEM_TONES = Object.freeze([1.5, 2]);
+// Energy ping pitch per pickup tier (spec 26.4.1, R46 B-2): minerals rise small -> normal -> large
+// as root, major third and fifth (0 / 386 / 702 cents); the gem is a distinct two-tone figure that
+// starts an octave above the root (above mineral_large) and rises a fourth (2, then 2.6667).
+export const ENERGY_TIERS = Object.freeze({mineral_small: 1, mineral_normal: 1.25, mineral_large: 1.5});
+export const GEM_TONES = Object.freeze([2, 2.6667]);
+// Pickup tier of a destroying event's numeric pickup tuple (NOTE 27: kind 1 mineral / 2 gem, plus
+// an amount): 2 -> gem; 1 -> mineral_large (amount >= 50), mineral_normal (>= 25) or
+// mineral_small; any other kind -> null (an unknown pickup voices the explosion only).
+export function tierOf(kind, amount) {
+  if (kind === 2) return 'gem';
+  if (kind !== 1) return null;
+  return amount >= 50 ? 'mineral_large' : amount >= 25 ? 'mineral_normal' : 'mineral_small';
+}
 const LASER = {gain: 0.3, attack: 0.004, length: 0.14, from: 1800, to: 240};
 const ROCKET = {gain: 0.6, attack: 0.03, length: 0.5, cutoffFrom: 260, cutoffTo: 3400, q: 1.4, thump: 70};
 const EXPLODE = {gain: 0.55, attack: 0.004, length: 0.42, cutoffFrom: 2400, cutoffTo: 140, q: 0.8, thump: 52};
@@ -130,8 +139,8 @@ export class Sfx {
     thump.onended = () => { thump.disconnect(); tenv.disconnect(); };
     return 2;
   }
-  // Energy: bright short triangle ping, base pitch x ENERGY_TIERS[tier]; a gem plays two pings a
-  // rising fourth apart (GEM_TONES). Returns the number of pings started (0 for an unknown tier).
+  // Energy: bright short triangle ping, base pitch x ENERGY_TIERS[tier]; a gem plays two pings, an
+  // octave above the root and then a rising fourth higher (GEM_TONES). Returns the number of pings started (0 for an unknown tier).
   energy(context, tier) {
     const tones = tier === 'gem' ? GEM_TONES : ENERGY_TIERS[tier] ? [ENERGY_TIERS[tier]] : [];
     const now = context.currentTime;
