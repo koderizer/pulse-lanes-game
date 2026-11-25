@@ -14,8 +14,10 @@ export class Music {
     this.unlocked = false;
     this.quietMode = false;
     this.suspensions = new Set();
+    this.gestureResumeIssued = false;
   }
   gesture() {
+    this.gestureResumeIssued = false;
     this.quietMode = false;
     if (!this.context) {
       const Audio = globalThis.AudioContext ?? globalThis.webkitAudioContext;
@@ -37,9 +39,9 @@ export class Music {
       }
     }
     if (this.attempt) {
-      // Gestures in one stack coalesce. A gesture in a later task renews the pending attempt: a
-      // resume issued outside a trusted gesture (mobile autoplay policy) may never settle, and it
-      // must not swallow the later real gesture that can start the context.
+      // AU-2 (R47): coalesce the silent-buffer source, but every gesture while not running still
+      // calls resume() in the caller's stack (mobile autoplay ignores deferred resume).
+      if (this.context.state !== 'running') this.syncResume();
       if (!this.attempt.fresh) this.kick(this.attempt);
       return;
     }
@@ -59,12 +61,19 @@ export class Music {
   // One resume plus silent buffer for `attempt`, both in the caller's stack. An attempt may hold
   // several kicks: the first kick that fulfills completes it; a failed kick completes it only
   // when no other kick of the same attempt is still open.
+  syncResume() {
+    this.gestureResumeIssued = true;
+    try {
+      Promise.resolve(this.context.resume()).then(() => this.drain(), () => this.drain());
+    } catch { /* AU-3: a throw is handled on the primary kick attempt */ }
+  }
   kick(attempt) {
     attempt.fresh = true;
     queueMicrotask(() => { attempt.fresh = false; });
     let resume, error = null;
     try {
       resume = this.context.resume();
+      this.gestureResumeIssued = true;
     } catch (thrown) {
       error = String(thrown?.message ?? thrown);
     }

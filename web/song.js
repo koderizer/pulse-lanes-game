@@ -30,9 +30,9 @@ const SHA_PATTERN = /^[0-9a-f]{64}$/;
 const LICENSE_LABEL = Object.freeze({'CC0-1.0': 'CC0 1.0', 'CC-BY-4.0': 'CC BY 4.0'});
 const ACTIVE = Object.freeze(['loading', 'playing', 'stalled']);
 
-// Lobby credit line for a bundled track: "Title by Artist (CC BY 4.0)".
+// Lobby credit line for a bundled track: "Title by Artist" (license lives in #song-credits strip).
 export function songCredit(track) {
-  return `${track.title} by ${track.artist} (${LICENSE_LABEL[track.license] ?? track.license})`;
+  return `${track.title} by ${track.artist}`;
 }
 
 // Stored value -> selection. Anything but 'synth' or a known bundled id (so never 'local') is synth.
@@ -110,6 +110,8 @@ export class SongPlayer {
     this.lastTime = 0;
     this.lastAdvance = 0;
     this.requestAt = 0;
+    this.contextHooked = false;
+    this.unproven = false;
   }
 
   // ---------------------------------------------------------------- selection and level
@@ -192,8 +194,12 @@ export class SongPlayer {
 
   // ---------------------------------------------------------------- the one place play() is called
   gesture() {
-    if (!this.wanted() || this.state === 'failed' || ACTIVE.includes(this.state)) return;
+    if (!this.wanted() || this.state === 'failed') return;
     if (!this.music?.context || !this.music?.gain) return;
+    const ctx = this.music.context;
+    const live = ctx.state === 'running' || ctx.state == null;
+    if (!live && !this.music.gestureResumeIssued) return;
+    if (ACTIVE.includes(this.state)) return;
     const id = ++this.loadId;
     try {
       this.ensureGraph();
@@ -214,9 +220,22 @@ export class SongPlayer {
     catch (err) { this.rejected(err, id); return; }
     Promise.resolve(pending).then(undefined, err => this.rejected(err, id));
   }
+  hookContext() {
+    const ctx = this.music?.context;
+    if (!ctx || this.contextHooked || typeof ctx.addEventListener !== 'function') return;
+    this.contextHooked = true;
+    ctx.addEventListener('statechange', () => {
+      if (ctx.state === 'running') { this.unproven = false; return; }
+      if (this.state === 'playing' || ACTIVE.includes(this.state)) {
+        this.unproven = true;
+        this.haltElement();
+      }
+    });
+  }
   ensureGraph() {
     if (this.element) return;
     const {context, gain} = this.music;
+    this.hookContext();
     const element = this.createAudio();
     element.preload = 'none';
     element.loop = true;

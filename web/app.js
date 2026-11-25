@@ -10,11 +10,11 @@ import {digest} from './digest.js';
 import {Music} from './music.js';
 import {ScoreVoice} from './score_voice.js';
 import {Sfx, SFX_CODES, tierOf} from './sfx.js';
-import {SongPlayer, SONG_KEY, SONG_LEVEL_KEY, SONG_FAILED_TEXT, songCredit, songIdOrDefault, songLevelOrDefault} from './song.js';
+import {SongPlayer, SONG_KEY, SONG_LEVEL_KEY, SONG_FAILED_TEXT, songCredit, songIdOrDefault} from './song.js';
 import {SONGS} from './songs/manifest.js';
 import {renderHud, buildControls, formatKm, MODE_LABELS, paintRocketLatch} from './hud.js';
 import {createPause} from './pause.js';
-import {applySetting, defaultSettings, lastResultText, retryEnabled, SETTING_CONTROLS} from './lobby_model.js';
+import {applySetting, defaultSettings, lastResultText, retryEnabled, SETTING_CONTROLS, volumeOf} from './lobby_model.js';
 import {createRenderer, createTrack, fovyFor, beatCues, LANE_SPACING, MU} from './render.js';
 import {createRenderer2d, projectCross, shipAnchor} from './render2d.js';
 import {createGameOver, drawShipPlan} from './gameover.js';
@@ -38,6 +38,7 @@ const music = new Music();
 const voice = new ScoreVoice(music);
 const sfx = new Sfx(music);
 const song = new SongPlayer(music, {tracks: SONGS});
+function unlockAudio() { music.gesture(); song.gesture(); }
 let save = null, session = null, game = null, map = null, course = [], view = EMPTY_VIEW;
 let prevState = null, currState = null, hudState = null, lastRun = null, lastSeed = null, seed = randomSeed();
 let running = false, recorded = false, accumulator = 0, previousFrame = null, lastActive = Date.now();
@@ -169,9 +170,9 @@ function updateLobby() {
   showRendererKind();
   showSong();
   const s = settingsNow();
-  $('set-music-level').value = String(s.music_level);
-  $('set-music-level-value').textContent = String(s.music_level);
-  $('set-mute').checked = s.mute;
+  const vol = volumeOf(s);
+  $('set-volume').value = String(vol);
+  $('set-volume-value').textContent = String(vol);
   $('set-quality').value = s.quality;
   $('set-reduced-motion').checked = s.reduced_motion;
   if (!save) { $('history').textContent = 'Save could not be loaded. Import a valid save or choose New empty save.'; return; }
@@ -297,18 +298,17 @@ function storeSong(key, value) {
   try { localStorage.setItem(key, value); } catch { /* the choice still applies until the page closes */ }
 }
 function loadSongPrefs() {
-  let id = 'synth', level = 5;
+  let id = 'synth';
+  try { localStorage.removeItem(SONG_LEVEL_KEY); } catch { /* storage unavailable */ }
   try { id = songIdOrDefault(localStorage.getItem(SONG_KEY), SONGS); } catch { /* storage unavailable: defaults */ }
-  try { level = songLevelOrDefault(localStorage.getItem(SONG_LEVEL_KEY)); } catch { /* storage unavailable: defaults */ }
   song.select(id);
-  song.setLevel(level);
+  const s = settingsNow();
+  song.setLevel(s.music_level);
 }
 function showSong() {
   if (!songTile) return;
   const info = song.inspect();
   $('set-song').value = info.selection;
-  $('set-song-level').value = String(info.level);
-  $('set-song-level-value').textContent = String(info.level);
   const track = SONGS.find(t => t.id === info.selection);
   $('song-credit').textContent = track ? songCredit(track) : info.selection === 'local' ? (song.localFile?.name ?? '') : '';
   $('song-status').textContent = info.state === 'failed' ? SONG_FAILED_TEXT : '';
@@ -324,16 +324,13 @@ function buildSongTile() {
   const label = make('label', {}, {for: 'set-song'});
   label.append(make('span', {textContent: 'Song'}));
   const select = make('select', {id: 'set-song'});
-  const options = [['synth', 'Synth score'], ...SONGS.map(t => [t.id, t.title]), ['local', 'From this device...']];
+  const options = [['synth', 'Synth score'], ...SONGS.map(t => [t.id, `${t.title} - ${t.artist}`]), ['local', 'From this device...']];
   for (const [value, text] of options) select.append(make('option', {value, textContent: text}));
   const file = make('input', {id: 'set-song-file', type: 'file', hidden: true}, {accept: 'audio/*'});
-  const levelLabel = make('label', {}, {for: 'set-song-level'});
-  levelLabel.append(make('span', {textContent: 'Song level'}), make('output', {id: 'set-song-level-value'}));
-  const level = make('input', {id: 'set-song-level', type: 'range'}, {min: '1', max: '10', step: '1'});
   const credit = make('p', {id: 'song-credit'});
   const status = make('p', {id: 'song-status'}, {role: 'status'});
-  tile.append(label, select, file, levelLabel, level, credit, status);
-  lobby.querySelector('.tile.music').after(tile);
+  tile.append(label, select, file, credit, status);
+  lobby.querySelector('.tile.volume').after(tile);
   songTile = tile;
   select.addEventListener('change', event => {
     const id = event.target.value;
@@ -347,13 +344,16 @@ function buildSongTile() {
     event.target.value = ''; // the same file can be picked again
     showSong();
   });
-  level.addEventListener('input', event => {
-    const n = songLevelOrDefault(String(event.target.value));
-    song.setLevel(n);
-    storeSong(SONG_LEVEL_KEY, String(n));
-    showSong();
-  });
   showSong();
+}
+
+const STRIP_LICENSE = Object.freeze({'CC0-1.0': 'CC0', 'CC-BY-4.0': 'CC BY 4.0'});
+function buildSongCreditsStrip() {
+  const parts = SONGS.map(t => `"${t.title}" by ${t.artist} (${STRIP_LICENSE[t.license] ?? t.license})`);
+  const p = document.createElement('p');
+  p.id = 'song-credits';
+  p.textContent = `Music: ${parts.join(', ')} - details: web/songs/ATTRIBUTION.md`;
+  lobby.after(p);
 }
 
 // Challenge scan (spec 20 QR-3/QR-4, ruling R33). The Scan button, the banner and the scan
@@ -428,8 +428,11 @@ function openLobbyUnlessGameOver() { if (!gameOver.isOpen()) openLobby(); }
 
 function applySettingsToOutputs() {
   const s = settingsNow();
-  music.setLevel(s.music_level);
   music.setMute(s.mute);
+  if (!s.mute) {
+    music.setLevel(s.music_level);
+    song.setLevel(s.music_level);
+  }
   renderer?.setSettings({quality: s.quality, reduced_motion: s.reduced_motion});
 }
 function changeSetting(key, raw) {
@@ -439,8 +442,15 @@ function changeSetting(key, raw) {
   applySettingsToOutputs();
   updateLobby();
 }
-$(SETTING_CONTROLS.music_level).addEventListener('input', event => changeSetting('music_level', event.target.value));
-$(SETTING_CONTROLS.mute).addEventListener('change', event => { changeSetting('mute', event.target.checked); music.gesture(); song.gesture(); });
+$('set-volume').addEventListener('input', event => { // changeSetting before unlockAudio (AU-7)
+  const prev = volumeOf(settingsNow());
+  changeSetting('volume', event.target.value);
+  applySettingsToOutputs();
+  const vol = volumeOf(settingsNow());
+  $('set-volume-value').textContent = String(vol);
+  if (prev === 0 && vol > 0) unlockAudio();
+  else if (running && !pause.isPaused() && vol > 0) unlockAudio();
+});
 $(SETTING_CONTROLS.quality).addEventListener('change', event => changeSetting('quality', event.target.value));
 $(SETTING_CONTROLS.reduced_motion).addEventListener('change', event => changeSetting('reduced_motion', event.target.checked));
 
@@ -469,7 +479,7 @@ function start(nextSeed) {
   accumulator = 0; previousFrame = null; eventCursor = 0;
   setRocketLatch(false); // a run starts on the laser (ammo starts at 0)
   music.reset(); song.pause(); voice.setMap(scoreMap);
-  beginSession(); song.startRun(); music.gesture(); song.gesture(); persist();
+  beginSession(); song.startRun(); unlockAudio(); persist();
   renderer.setCourse(map, course);
   if (rendererKind === 'webgl2') shipMirror.setCourse(map); // R44.2: same reset as render.js
   runShip = shipId; renderer.setShip?.(runShip);
@@ -519,14 +529,14 @@ function finishRun() {
 
 const pause = createPause({
   onPause: () => { accumulator = 0; previousFrame = null; music.quiet(); song.pause(); },
-  onResume: () => { accumulator = 0; previousFrame = null; lastActive = Date.now(); song.resume(); music.gesture(); song.gesture(); },
+  onResume: () => { accumulator = 0; previousFrame = null; lastActive = Date.now(); song.resume(); unlockAudio(); },
   onExit: () => { endSession(); openLobby(); },
 });
 
 // ------------------------------------------------------------------ input sampling (spec 6.4)
 function currentStick() { return stickPointer !== null ? touchStick : keyboardStick(held); }
 function press(kind) {
-  music.gesture(); song.gesture();
+  unlockAudio();
   if (!running || pause.isPaused() || document.hidden) return;
   const t = game.state().processed;
   if (kind === 'fire') holdFire(); // level rises; liftFire() drops it (R41.3)
@@ -561,7 +571,7 @@ function setRocketLatch(on) {
   rocketLatch = Boolean(on);
   paintRocketLatch(document, rocketLatch);
 }
-function toggleRocketLatch() { music.gesture(); song.gesture(); setRocketLatch(!rocketLatch); }
+function toggleRocketLatch() { unlockAudio(); setRocketLatch(!rocketLatch); }
 // Spec 26.4.1 cue wiring, R46 B-1 delta bridge: voice one processed tick from the state rows and
 // view rows app.js already holds, with no game.trace() (its deep copy grows with run length).
 //   fire:  fire_ready rose -> the weapon of the accepted shot (state().weapon, SFX_CODES).
@@ -1183,7 +1193,7 @@ function releaseStick() {
 // capture radius, as before) or anywhere on the game canvas. A pointerdown on any button (fire,
 // boost, hops, ammo badge, pause) never captures: those keep their own handlers.
 document.addEventListener('pointerdown', event => {
-  music.gesture(); song.gesture();
+  unlockAudio();
   if (!running || stickPointer !== null) return;
   if (event.target?.closest?.('button')) return;
   const [x, y] = stickCentre();
@@ -1280,8 +1290,9 @@ $('reset').onclick = () => {
   persist(); notice('New empty save created.');
 };
 
-document.addEventListener('pointerdown', () => { music.gesture(); song.gesture(); }, {once: true});
-document.addEventListener('keydown', () => { music.gesture(); song.gesture(); }, {once: true});
+document.addEventListener('pointerdown', () => unlockAudio());
+document.addEventListener('click', () => { if (running && !pause.isPaused()) unlockAudio(); });
+document.addEventListener('keydown', () => unlockAudio());
 document.addEventListener('visibilitychange', () => {
   previousFrame = null; accumulator = 0;
   if (document.hidden) { music.quiet(); song.pause(); scanner?.close(); } // a hidden page never keeps the camera open
@@ -1308,6 +1319,7 @@ modeId = loadMode();
 buildModePicker();
 loadSongPrefs();
 buildSongTile();
+buildSongCreditsStrip();
 buildChallengeUi();
 initRenderer();
 // Lobby backdrop: the course of the shown seed, cruising without asteroids (presentation only).

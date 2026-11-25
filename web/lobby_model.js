@@ -10,11 +10,14 @@ export const MUSIC_LEVEL_MAX = 10;
 
 // Every setting control id; all of them are descendants of #lobby (index.html).
 export const SETTING_CONTROLS = Object.freeze({
-  music_level: 'set-music-level',
-  mute: 'set-mute',
+  volume: 'set-volume',
   quality: 'set-quality',
   reduced_motion: 'set-reduced-motion',
 });
+
+export function volumeOf(settings) {
+  return settings.mute ? 0 : settings.music_level;
+}
 
 const isLevel = n => Number.isInteger(n) && n >= MUSIC_LEVEL_MIN && n <= MUSIC_LEVEL_MAX;
 
@@ -39,6 +42,12 @@ export function validSettings(settings) {
 // Parse the raw value of a DOM control (range gives a string, checkbox a boolean,
 // select a string). Returns {ok: true, value} or {ok: false, code}.
 export function parseControl(key, raw) {
+  if (key === 'volume') {
+    let value = raw;
+    if (typeof raw === 'string' && /^(10|[0-9])$/.test(raw)) value = Number(raw);
+    if (!isLevel(value)) return {ok: false, code: 'invalid_setting'};
+    return {ok: true, value};
+  }
   if (!Object.hasOwn(VALIDATORS, key)) return {ok: false, code: 'unknown_setting'};
   let value = raw;
   if (key === 'music_level' && typeof raw === 'string' && /^(0|[1-9][0-9]?)$/.test(raw)) value = Number(raw);
@@ -49,6 +58,18 @@ export function parseControl(key, raw) {
 // A settings change. Never mutates `settings`. A valid change always asks for an
 // immediate persist (before the lobby closes); an unchanged value or an invalid one does not.
 export function applySetting(settings, key, raw) {
+  if (key === 'volume') {
+    const parsed = parseControl('volume', raw);
+    if (!parsed.ok) return {ok: false, code: parsed.code, settings, persist: false};
+    const v = parsed.value;
+    const next = v === 0
+      ? {...settings, mute: true}
+      : {...settings, mute: false, music_level: v};
+    if (settings.mute === next.mute && settings.music_level === next.music_level) {
+      return {ok: true, settings, persist: false};
+    }
+    return {ok: true, settings: next, persist: true};
+  }
   const parsed = parseControl(key, raw);
   if (!parsed.ok) return {ok: false, code: parsed.code, settings, persist: false};
   if (settings[key] === parsed.value) return {ok: true, settings, persist: false};
