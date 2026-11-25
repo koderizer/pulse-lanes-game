@@ -398,3 +398,22 @@ dialog.scan[data-mode=paste] .scan-actions{flex:none}
 /* Reduced motion: honour the lobby setting (the checkbox app.js keeps in sync) and the OS preference. */
 body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *::before,body:has(#set-reduced-motion:checked) *::after{animation:none!important;transition:none!important}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}}
+
+/* R50 lobby v2 (ruling R50.1-R50.4): serial seed, ship stats hero block, Game settings dialog. */
+#seed.serial { font: 500 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-dim, #8b93b0);
+  letter-spacing: .04em; margin: 0 0 0 10px; align-self: center; opacity: .85; }
+.launch { position: relative; }
+.ships { order: -1; }
+.ship-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; margin: 10px 2px 2px; }
+.ship-stats .ship-current { grid-column: 1 / -1; margin: 4px 0 2px; font-size: 13px; letter-spacing: .12em; color: var(--ink, #e8ecff); }
+.ship-stats .stat { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px solid rgba(140, 150, 190, .14); padding: 3px 0; }
+.ship-stats .stat .k { font-size: 10px; text-transform: uppercase; letter-spacing: .14em; color: var(--ink-dim, #8b93b0); }
+.ship-stats .stat output { font: 600 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink, #e8ecff); }
+#game-settings { width: 100%; margin-top: 6px; }
+#settings-dialog { border: 1px solid rgba(140, 150, 190, .35); border-radius: 14px; background: #0b0e1d; color: var(--ink, #e8ecff);
+  padding: 18px 18px 14px; min-width: min(320px, 86vw); }
+#settings-dialog::backdrop { background: rgba(3, 4, 12, .72); }
+#settings-dialog .panel h2 { margin: 0 0 10px; font-size: 15px; letter-spacing: .1em; }
+#settings-dialog .settings-row { display: flex; gap: 8px; margin: 6px 0; }
+#settings-dialog .settings-row > * { flex: 1; }
+#settings-done { margin-top: 10px; width: 100%; }

@@ -15,6 +15,7 @@ import {SONGS} from './songs/manifest.js';
 import {renderHud, buildControls, formatKm, MODE_LABELS, paintRocketLatch} from './hud.js';
 import {createPause} from './pause.js';
 import {applySetting, defaultSettings, lastResultText, retryEnabled, SETTING_CONTROLS, volumeOf} from './lobby_model.js';
+import {shipStats, STAT_ROWS} from './ship_stats.js';
 import {createRenderer, createTrack, fovyFor, beatCues, LANE_SPACING, MU} from './render.js';
 import {createRenderer2d, projectCross, shipAnchor} from './render2d.js';
 import {createGameOver, drawShipPlan} from './gameover.js';
@@ -40,6 +41,13 @@ const sfx = new Sfx(music);
 const song = new SongPlayer(music, {tracks: SONGS});
 function unlockAudio() { music.gesture(); song.gesture(); }
 let save = null, session = null, game = null, map = null, course = [], view = EMPTY_VIEW;
+// R50.3: Quality and Calm are no longer user settings. Every save (loaded, imported or created)
+// is normalized to the forced defaults on the web layer; the state schema keeps both keys so the
+// frozen save/export contract is untouched.
+function forceSettingsDefaults(state) {
+  if (state && state.settings) state.settings = {...state.settings, quality: 'high', reduced_motion: true};
+  return state;
+}
 let prevState = null, currState = null, hudState = null, lastRun = null, lastSeed = null, seed = randomSeed();
 let running = false, recorded = false, accumulator = 0, previousFrame = null, lastActive = Date.now();
 let pendingReload = false; // R49: a new service worker took over while a run was live
@@ -79,7 +87,11 @@ let runSettings = null;
 // ------------------------------------------------------------------ renderer selection (spec 12)
 let renderer = null, rendererKind = 'unknown';
 const settingsNow = () => save?.settings ?? defaultSettings();
-function showRendererKind() { $('renderer-kind').textContent = rendererKind; }
+function showRendererKind() {
+  // R50.1: the GPU row left the lobby; the writer stays null-safe (guard-pinned form).
+  const kindView = $('renderer-kind');
+  if (kindView) kindView.textContent = rendererKind;
+}
 function useFallback(reason) {
   try { renderer?.dispose?.(); } catch { /* the failed renderer is discarded either way */ }
   // A canvas that ever held a WebGL context cannot give a 2D context; swap in a fresh element.
@@ -175,8 +187,7 @@ function updateLobby() {
   const vol = volumeOf(s);
   $('set-volume').value = String(vol);
   $('set-volume-value').textContent = String(vol);
-  $('set-quality').value = s.quality;
-  $('set-reduced-motion').checked = s.reduced_motion;
+  renderShipStats(); // R50.2: the stats grid tracks the selected ship
   if (!save) { $('history').textContent = 'Save could not be loaded. Import a valid save or choose New empty save.'; return; }
   const best = save.runs.reduce((score, run) => run.ruleset_id === 'pl-v2' && run.terminal_reason !== 'abandoned' ? Math.max(score, run.score) : score, 0);
   $('history').textContent = `${save.runs.length} recorded runs · Best: ${best} / ${MAX_TICKS} ticks`;
@@ -208,6 +219,13 @@ function chooseShip(id) {
   try { localStorage.setItem(SHIP_KEY, shipId); } catch { /* the choice still applies until the page closes */ }
   renderer?.setShip?.(shipId);
   showShip();
+  renderShipStats(); // R50.2
+}
+function renderShipStats() {
+  const s = shipStats(shipId);
+  const name = $('ship-current');
+  if (name) name.textContent = `${s.name} · ${s.blurb}`;
+  for (const [, id] of STAT_ROWS) { const o = $(id); if (o) o.textContent = s.values[id]; }
 }
 function buildShipPicker() {
   const section = document.createElement('section');
@@ -237,8 +255,104 @@ function buildShipPicker() {
     shipButtons.push(b);
     section.append(b);
   }
+  // R50.2: the ship block is the lobby's main section: buttons plus the selected ship's stats,
+  // every value read from its law source (sim constants / registry), never hard-coded here.
+  const stats = document.createElement('div');
+  stats.className = 'ship-stats';
+  stats.id = 'ship-stats';
+  const nm = document.createElement('h3');
+  nm.className = 'ship-current';
+  nm.id = 'ship-current';
+  stats.append(nm);
+  for (const [label, id] of STAT_ROWS) {
+    const row = document.createElement('div');
+    row.className = 'stat';
+    const k = document.createElement('span');
+    k.className = 'k';
+    k.textContent = label;
+    const o = document.createElement('output');
+    o.id = id;
+    row.append(k, o);
+    stats.append(row);
+  }
+  section.append(stats);
   lobby.querySelector('.launch').after(section);
   showShip();
+  renderShipStats();
+}
+
+// R50 (owner directive): lobby v2. Technical rows leave the face: the GPU row and the Seed and
+// GPU data rows are removed (the seed lives on as a small serial beside PLAY, keeping its id and
+// wiring), the Quality and Calm tiles are removed (forced defaults below), and the vault row
+// collapses into one "Game settings" button that opens a dialog hosting the SAME controls, so
+// every existing id and handler keeps working untouched. index.html stays byte-unchanged.
+let settingsDialog = null;
+function openSettings() {
+  if (!settingsDialog || settingsDialog.open) return;
+  try { settingsDialog.showModal(); } catch { settingsDialog.setAttribute('open', ''); }
+}
+function closeSettings() {
+  if (!settingsDialog || !settingsDialog.open) return;
+  try { settingsDialog.close(); } catch { settingsDialog.removeAttribute('open'); }
+}
+function tileOf(el) {
+  let n = el;
+  while (n && n !== lobby) {
+    if (n.classList && n.classList.contains('tile')) return n;
+    n = n.parentElement;
+  }
+  return el;
+}
+function buildLobbyV2() {
+  const seedEl = $('seed'); // capture before the data rows go; the serial keeps this very element
+  const data = lobby.querySelector('.data');
+  for (const row of Array.from(data ? data.children : [])) {
+    const k = row.querySelector('.k');
+    if (k && (k.textContent === 'GPU' || k.textContent === 'Seed')) row.remove();
+  }
+  const launch = lobby.querySelector('.launch');
+  if (seedEl && launch) { seedEl.className = 'serial'; seedEl.title = 'seed serial'; launch.append(seedEl); }
+  for (const id of ['set-quality', 'set-reduced-motion']) {
+    const el = $(id);
+    if (el) tileOf(el).remove();
+  }
+  const vault = lobby.querySelector('.vault');
+  if (vault) {
+    settingsDialog = document.createElement('dialog');
+    settingsDialog.id = 'settings-dialog';
+    settingsDialog.setAttribute('aria-label', 'Game settings');
+    const panel = document.createElement('div');
+    panel.className = 'panel';
+    const h = document.createElement('h2');
+    h.textContent = 'Game settings';
+    panel.append(h);
+    for (const el of Array.from(vault.children)) {
+      const row = document.createElement('div');
+      row.className = 'settings-row';
+      row.append(el);
+      panel.append(row);
+    }
+    const done = document.createElement('button');
+    done.type = 'button';
+    done.id = 'settings-done';
+    done.className = 'primary';
+    done.textContent = 'Done';
+    done.addEventListener('click', closeSettings);
+    panel.append(done);
+    settingsDialog.append(panel);
+    document.body.append(settingsDialog);
+    const gear = document.createElement('button');
+    gear.type = 'button';
+    gear.id = 'game-settings';
+    gear.className = 'icon';
+    gear.setAttribute('aria-label', 'Game settings: save, load, export, import, new, replay');
+    const label = document.createElement('span');
+    label.textContent = 'Game settings';
+    gear.append(label);
+    gear.addEventListener('click', openSettings);
+    vault.after(gear);
+    vault.remove();
+  }
 }
 
 // Mode selector (spec 21.6, ruling R35): DEATH (default), 90S, 120S as lobby-token buttons like
@@ -454,8 +568,6 @@ $('set-volume').addEventListener('input', event => { // changeSetting before unl
   if (prev === 0 && vol > 0) unlockAudio();
   else if (running && !pause.isPaused() && vol > 0) unlockAudio();
 });
-$(SETTING_CONTROLS.quality).addEventListener('change', event => changeSetting('quality', event.target.value));
-$(SETTING_CONTROLS.reduced_motion).addEventListener('change', event => changeSetting('reduced_motion', event.target.checked));
 
 // ------------------------------------------------------------------ run lifecycle
 function start(nextSeed) {
@@ -1264,7 +1376,7 @@ function download(filename, content, type = 'application/json') {
 function replaceSave(text) {
   const result = importSave(text);
   if (!result.ok) return notice(`Save was not changed: ${result.code}.`);
-  endSession(); save = result.state; game = null; recorded = false; lastRun = null;
+  endSession(); save = forceSettingsDefaults(result.state); game = null; recorded = false; lastRun = null;
   applySettingsToOutputs();
   persist(); notice('Save loaded. Settings and run history restored.');
 }
@@ -1288,7 +1400,7 @@ $('import').onchange = async event => {
 };
 $('reset').onclick = () => {
   if (save && !confirm('Start an empty save? Export first if you want to keep your history.')) return;
-  endSession(); save = newSave(crypto.randomUUID()); game = null; lastRun = null;
+  endSession(); save = forceSettingsDefaults(newSave(crypto.randomUUID())); game = null; lastRun = null;
   applySettingsToOutputs();
   persist(); notice('New empty save created.');
 };
@@ -1312,13 +1424,13 @@ setInterval(() => {
 // ------------------------------------------------------------------ boot
 try {
   const text = localStorage.getItem(STORAGE_KEY);
-  if (text === null) save = newSave(crypto.randomUUID());
+  if (text === null) save = forceSettingsDefaults(newSave(crypto.randomUUID()));
   else {
     const result = importSave(text);
-    if (result.ok) save = result.state;
+    if (result.ok) save = forceSettingsDefaults(result.state);
     else notice(`Existing save was not changed: ${result.code}.`);
   }
-} catch { save = newSave(crypto.randomUUID()); notice('Local storage unavailable. Use Export save to keep your runs.'); }
+} catch { save = forceSettingsDefaults(newSave(crypto.randomUUID())); notice('Local storage unavailable. Use Export save to keep your runs.'); }
 shipId = runShip = loadShip(); // before the renderer exists, so the first frame shows the chosen ship
 buildShipPicker();
 modeId = loadMode();
@@ -1326,6 +1438,7 @@ buildModePicker();
 loadSongPrefs();
 buildSongTile();
 buildSongCreditsStrip();
+buildLobbyV2(); // R50
 buildChallengeUi();
 initRenderer();
 // Lobby backdrop: the course of the shown seed, cruising without asteroids (presentation only).

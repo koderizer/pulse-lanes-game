@@ -8,11 +8,10 @@ export const QUALITIES = Object.freeze(['high', 'low']);
 export const MUSIC_LEVEL_MIN = 0;
 export const MUSIC_LEVEL_MAX = 10;
 
-// Every setting control id; all of them are descendants of #lobby (index.html).
+// Setting control ids exposed in the lobby (R50.3): only volume. Quality and Calm are no longer
+// lobby controls (forced defaults in app.js); applySetting still accepts the full schema keys.
 export const SETTING_CONTROLS = Object.freeze({
   volume: 'set-volume',
-  quality: 'set-quality',
-  reduced_motion: 'set-reduced-motion',
 });
 
 export function volumeOf(settings) {
