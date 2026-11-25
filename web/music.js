@@ -14,9 +14,11 @@ export class Music {
     this.unlocked = false;
     this.quietMode = false;
     this.suspensions = new Set();
+    this.evLog = []; // R49.2: bounded ring of unlock-path events for the ?dbg overlay
     this.gestureResumeIssued = false;
   }
   gesture() {
+    this.ev('gesture');
     this.gestureResumeIssued = false;
     this.quietMode = false;
     if (!this.context) {
@@ -68,6 +70,7 @@ export class Music {
     } catch { /* AU-3: a throw is handled on the primary kick attempt */ }
   }
   kick(attempt) {
+    this.ev('kick');
     attempt.fresh = true;
     queueMicrotask(() => { attempt.fresh = false; });
     let resume, error = null;
@@ -93,12 +96,23 @@ export class Music {
     // before this kick's settle microtask, and must still see and expose it (never fake success).
     if (error !== null) attempt.error = error;
     attempt.open++;
+    // R49.2 F1 (AU-3): engines that deliver a gesture-created context already 'running' never fire
+    // statechange for it, and some never settle the resume promise. An attempt whose kick observes
+    // running (now, or after this task) IS complete: observable state is the authority, the promise
+    // is only one way to observe it.
+    if (this.context.state === 'running' && attempt.error === null) this.finishUnlock(attempt, null);
+    else queueMicrotask(() => {
+      if (this.attempt === attempt && this.context && this.context.state === 'running' && attempt.error === null) {
+        this.finishUnlock(attempt, null);
+      }
+    });
     Promise.resolve(resume).then(
       () => this.settleKick(attempt, error),
       thrown => this.settleKick(attempt, error ?? String(thrown?.message ?? thrown)),
     );
   }
   settleKick(attempt, error) {
+    this.ev('settle');
     attempt.open--;
     if (error !== null) {
       attempt.error = attempt.error ?? error;
@@ -109,12 +123,14 @@ export class Music {
   finishUnlock(attempt, error) {
     // Canceled attempts cannot change the current run's success/error state.
     if (this.attempt !== attempt) return;
+    this.ev('finish', error === null ? 'ok' : 'err');
     this.attempt = null;
     this.unlockError = error;
     this.unlocked = error === null;
     this.drain();
   }
   onStateChange() {
+    this.ev('statechange');
     // R48.3 (AU-3 amendment, AU-11): a running observation completes the open attempt. A clean
     // attempt completes as successful (unlocked true); a recorded error is still exposed and the
     // AU-3 retry path stays available (one further gesture self-heals a running context).
@@ -176,6 +192,7 @@ export class Music {
     this.pendingTick = null;
   }
   quiet() {
+    this.ev('quiet');
     this.quietMode = true;
     this.pendingTick = null;
     this.attempt = null;
@@ -204,6 +221,10 @@ export class Music {
     this.latestTick = null;
     this.lastBeat = -1;
   }
+  ev(op, extra) {
+    if (this.evLog.length >= 60) this.evLog.shift();
+    this.evLog.push([op, this.context?.state ?? '-', extra ?? '']);
+  }
   inspect() {
     return {
       contextState: this.context?.state ?? null,
@@ -212,6 +233,10 @@ export class Music {
       pendingTick: this.pendingTick,
       lastBeat: this.lastBeat,
       unlockError: this.unlockError,
+      unlocked: this.unlocked,
+      quietMode: this.quietMode,
+      suspensions: this.suspensions.size,
+      ready: this.ready(),
     };
   }
 }

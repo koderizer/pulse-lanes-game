@@ -1294,6 +1294,9 @@ $('reset').onclick = () => {
 };
 
 document.addEventListener('pointerdown', () => unlockAudio());
+// R49.3 (AU-9): stick drags and swipes fire touch events; on mobile engines touchstart/touchend are
+// the user-activation triggers, so unlock must ride them too, not just pointerdown/keydown.
+document.addEventListener('touchstart', () => unlockAudio(), {passive: true});
 document.addEventListener('click', () => { if (running && !pause.isPaused()) unlockAudio(); });
 document.addEventListener('keydown', () => unlockAudio());
 document.addEventListener('visibilitychange', () => {
@@ -1355,3 +1358,23 @@ if (typeof caches !== 'undefined') caches.keys().then(keys => {
   }
   tag.textContent = stamp;
 }).catch(() => {});
+// R49.2: ?dbg telemetry overlay - a silent failure must never be invisible again.
+if (/[?&]dbg/.test(globalThis.location?.search ?? '')) {
+  const pre = document.createElement('pre');
+  pre.id = 'dbg';
+  pre.style.cssText = 'position:fixed;left:6px;top:6px;z-index:9;margin:0;font:10px/1.35 monospace;color:#9fe;background:rgba(4,6,12,.82);padding:6px 8px;max-width:96vw;pointer-events:none;white-space:pre-wrap';
+  document.body.appendChild(pre);
+  const taps = [];
+  window.addEventListener('pointerdown', () => { taps.unshift('tap ' + new Date().toISOString().slice(11, 19)); if (taps.length > 3) taps.pop(); }, {passive: true});
+  const render = () => {
+    try {
+      const i = music.inspect();
+      pre.textContent = [`ctx ${i.contextState} ready ${i.ready} unlocked ${i.unlocked} pending ${i.unlockPending}`,
+        `quiet ${i.quietMode} susp ${i.suspensions} muted ${i.muted} err ${i.unlockError ?? '-'}`,
+        `song ${song.state} run ${running} paused ${pause.isPaused()}`,
+        ...taps, ...music.evLog.slice(-10).map(e => e.join(' ')).reverse()].join('\n');
+    } catch (err) { pre.textContent = 'dbg ' + String(err); }
+  };
+  setInterval(render, 250);
+  render();
+}
