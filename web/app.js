@@ -42,6 +42,8 @@ function unlockAudio() { music.gesture(); song.gesture(); }
 let save = null, session = null, game = null, map = null, course = [], view = EMPTY_VIEW;
 let prevState = null, currState = null, hudState = null, lastRun = null, lastSeed = null, seed = randomSeed();
 let running = false, recorded = false, accumulator = 0, previousFrame = null, lastActive = Date.now();
+let pendingReload = false; // R49: a new service worker took over while a run was live
+
 // Spec 27.4.1 / R41.3: fire is a LEVEL (fireHeld 0 or 1), not a tap queue. lastSent keeps the
 // last entry's [sx, sy, fire level]; the level persists in the sim without entries (27.1.1).
 // fireTap / fireRepress: pending edges kept for the next tick (holdFire / liftFire below).
@@ -180,6 +182,7 @@ function updateLobby() {
   $('history').textContent = `${save.runs.length} recorded runs · Best: ${best} / ${MAX_TICKS} ticks`;
 }
 function openLobby() {
+  if (pendingReload) { pendingReload = false; location.reload(); return; } // R49: adopt the new build when idle
   gameOver.hide();
   document.body.classList.remove('running');
   updateLobby();
@@ -1329,6 +1332,26 @@ if (rendererKind === 'webgl2') shipMirror.setCourse(map); // R44.2: the backdrop
 applySettingsToOutputs();
 openLobby();
 requestAnimationFrame(frame);
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').then(() => navigator.serviceWorker.ready)
-  .then(() => { if (!$('notice').textContent) notice('Offline build cached. You can play without a connection.'); })
-  .catch(() => notice('Offline cache unavailable. Keep the local static server running to reload.'));
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js')
+    .then(reg => { if (reg) reg.update(); return navigator.serviceWorker.ready; }) // R49: check for a new build on every boot
+    .then(() => { if (!$('notice').textContent) notice('Offline build cached. You can play without a connection.'); })
+    .catch(() => notice('Offline cache unavailable. Keep the local static server running to reload.'));
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    // R49: the cache-first fetch handler pins the running page to its worker's assets, so adopting
+    // a new build requires a reload; never interrupt a live run, a pause, or the game-over read.
+    if (running || pause.isPaused() || gameOver.isOpen()) { pendingReload = true; return; }
+    location.reload();
+  });
+}
+if (typeof caches !== 'undefined') caches.keys().then(keys => {
+  const key = keys.find(k => k.indexOf('pulse-lanes-pl-web-') === 0); // R49: visible build stamp
+  const stamp = key ? key.slice(key.lastIndexOf('-') + 1) : 'no-cache';
+  let tag = $('build-tag');
+  if (!tag) {
+    tag = document.createElement('span');
+    tag.id = 'build-tag';
+    document.body.appendChild(tag);
+  }
+  tag.textContent = stamp;
+}).catch(() => {});
