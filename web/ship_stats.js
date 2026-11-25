@@ -23,7 +23,7 @@ export function shipStats(shipId) {
       'stat-recharge': '+' + ENERGY_REGEN + '/tick',
       'stat-drain': '-' + ENERGY_DRAIN + '/tick',
       'stat-speed': NOTE_SPEED[2] + ' u/t',
-      'stat-hull': (x1 - x0).toFixed(1) + ' x ' + (z1 - z0).toFixed(1) + ' u',
+      'stat-hull': (x1 - x0).toFixed(1) + ' x ' + (z1 - z0).toFixed(1) + ' x ' + (2 * model.height).toFixed(2) + ' u',
     },
   };
 }

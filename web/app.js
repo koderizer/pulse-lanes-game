@@ -1431,6 +1431,7 @@ try {
     else notice(`Existing save was not changed: ${result.code}.`);
   }
 } catch { save = forceSettingsDefaults(newSave(crypto.randomUUID())); notice('Local storage unavailable. Use Export save to keep your runs.'); }
+if (save) persist(); // R50.3: the forced-defaults migration rewrites storage, not just memory
 shipId = runShip = loadShip(); // before the renderer exists, so the first frame shows the chosen ship
 buildShipPicker();
 modeId = loadMode();

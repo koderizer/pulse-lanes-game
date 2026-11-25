@@ -177,8 +177,8 @@ export function applyChallenge(config, lobby) {
   const v2 = config.v === CHALLENGE_VERSION_V2;
   lobby.changeSetting('music_level', config.music_level);
   lobby.changeSetting('mute', config.mute);
-  lobby.changeSetting('quality', config.quality);
-  lobby.changeSetting('reduced_motion', config.reduced_motion);
+  // R50.3: quality and reduced_motion stay forced (high + Calm on); the codec still carries the
+  // fields for format compatibility, but a preset can no longer override the owner defaults.
   lobby.chooseShip(config.ship);
   if (v2) lobby.setMode?.(config.mode);
   lobby.setSeed(config.seed);
