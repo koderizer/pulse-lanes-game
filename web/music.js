@@ -31,7 +31,7 @@ export class Music {
         this.context = ctx;
         this.gain = gain;
         this.setMute(this.muted);
-        ctx.addEventListener('statechange', () => this.drain());
+        ctx.addEventListener('statechange', () => this.onStateChange());
       } catch {
         this.context = null;
         this.gain = null;
@@ -89,6 +89,9 @@ export class Music {
     } catch (thrown) {
       error = error ?? String(thrown?.message ?? thrown);
     }
+    // R48: record the error on the attempt NOW - an AU-3 running-observation completion can land
+    // before this kick's settle microtask, and must still see and expose it (never fake success).
+    if (error !== null) attempt.error = error;
     attempt.open++;
     Promise.resolve(resume).then(
       () => this.settleKick(attempt, error),
@@ -109,6 +112,15 @@ export class Music {
     this.attempt = null;
     this.unlockError = error;
     this.unlocked = error === null;
+    this.drain();
+  }
+  onStateChange() {
+    // R48.3 (AU-3 amendment, AU-11): a running observation completes the open attempt. A clean
+    // attempt completes as successful (unlocked true); a recorded error is still exposed and the
+    // AU-3 retry path stays available (one further gesture self-heals a running context).
+    if (this.context && this.context.state === 'running' && this.attempt) {
+      this.finishUnlock(this.attempt, this.attempt.error);
+    }
     this.drain();
   }
   setMute(muted) {
