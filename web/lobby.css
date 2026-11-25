@@ -443,6 +443,30 @@ body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *:
 #ship-stats #stat-hull{white-space:nowrap}
 #ship-stats .readout-tag,#ship-stats .stat .k{color:#a7afc9}
 
+/* R51.4 Music combo: volume + song tiles become one full-width horizontal control. */
+#lobby #music-control {
+  grid-column: 1 / -1; display: flex; align-items: center; gap: 12px;
+  padding: 8px 14px; border: 1px solid rgba(105, 226, 211, .35); border-radius: 12px;
+  background: rgba(11, 15, 32, .55); box-shadow: 0 0 12px rgba(105, 226, 211, .12);
+}
+#music-control .music-label {
+  flex: none; font: 800 11px/1 var(--mono, ui-monospace, monospace); text-transform: uppercase;
+  letter-spacing: .18em; color: var(--cyan); text-shadow: 0 0 10px rgba(105, 226, 211, .5);
+}
+#music-control .tile { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px;
+  border: 0; background: none; padding: 0; box-shadow: none; }
+#music-control .tile label { flex-direction: row; align-items: center; gap: 8px; }
+#music-control .tile label span { display: none; }
+#music-control .tile.song label { display: none; }
+#music-control .tile svg { width: 18px; height: 18px; flex: none; }
+#music-control input[type=range] { flex: 1; min-width: 70px; }
+#music-control output { color: var(--mag, #ff5bd6); font-weight: 700; min-width: 10px; }
+#music-control #set-song { flex: 1; min-width: 0; }
+#settings-dialog .serial-line { display: flex; justify-content: space-between; align-items: baseline;
+  gap: 10px; margin: 0 0 10px; padding-bottom: 8px; border-bottom: 1px solid rgba(105, 226, 211, .12); }
+#settings-dialog .serial-line > span { font: 700 10px/1 var(--mono, ui-monospace, monospace);
+  text-transform: uppercase; letter-spacing: .14em; color: #a7afc9; }
+
 /* R51.3 settings dialog: the vault controls reuse .icon markup, which is the big lobby tile
    style. Inside the dialog they must be compact action rows, not 224px squares. */
 #settings-dialog .icon {
@@ -455,3 +479,12 @@ body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *:
 #settings-dialog .primary { width: 100%; height: 44px; margin-top: 2px; border-radius: 10px; }
 #settings-dialog .icon svg { color: #eef1ff; }
 #settings-dialog .primary { text-transform: uppercase; letter-spacing: .1em; font: 700 12px/1 var(--mono, ui-monospace, monospace); }
+/* R51.4b: lay the volume group on one shared baseline (svg, slider, value in one row). */
+#music-control .tile.volume label { display: contents; }
+#music-control .tile.volume svg { order: 0; }
+#music-control .tile.volume input[type=range] { order: 1; }
+#music-control .tile.volume output { order: 2; }
+#music-control .tile.volume, #music-control .tile.song { align-items: center; }
+#music-control select { margin: 0; }
+#music-control #song-credit { display: none; }
+#music-control #song-status { margin: 0; font-size: 9px; line-height: 1.2; }

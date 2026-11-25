@@ -320,11 +320,23 @@ function buildLobbyV2() {
     const k = row.querySelector('.k');
     if (k && (k.textContent === 'GPU' || k.textContent === 'Seed')) row.remove();
   }
-  const launch = lobby.querySelector('.launch');
-  if (seedEl && launch) { seedEl.className = 'serial'; seedEl.title = 'seed serial'; launch.append(seedEl); }
   for (const id of ['set-quality', 'set-reduced-motion']) {
     const el = $(id);
     if (el) tileOf(el).remove();
+  }
+  // R51.4: Volume + Song become one horizontal Music combo (built after buildSongTile()).
+  const volumeTile = lobby.querySelector('.tile.volume');
+  const songTileEl = lobby.querySelector('.tile.song');
+  if (volumeTile && songTileEl) {
+    const combo = document.createElement('div');
+    combo.id = 'music-control';
+    combo.className = 'music-combo';
+    const head = document.createElement('span');
+    head.className = 'music-label';
+    head.textContent = 'Music';
+    combo.append(head);
+    volumeTile.before(combo); // place the combo first, then move the tiles into it
+    combo.append(volumeTile, songTileEl);
   }
   const vault = lobby.querySelector('.vault');
   if (vault) {
@@ -336,6 +348,16 @@ function buildLobbyV2() {
     const h = document.createElement('h2');
     h.textContent = 'Game settings';
     panel.append(h);
+    if (seedEl) { // R51.4: the seed serial lives in the dialog, not on the lobby face.
+      const line = document.createElement('div');
+      line.className = 'serial-line';
+      const cap = document.createElement('span');
+      cap.textContent = 'Seed';
+      seedEl.className = 'serial';
+      seedEl.title = 'seed serial';
+      line.append(cap, seedEl);
+      panel.append(line);
+    }
     for (const el of Array.from(vault.children)) {
       const row = document.createElement('div');
       row.className = 'settings-row';
@@ -547,7 +569,8 @@ function buildChallengeUi() {
   // R51.2: the scanner is a utility, not an action button - it lives in the bottom row with
   // Game settings. Falls back to the launch row only if the bottom row does not exist.
   const gear = $('game-settings');
-  if (gear && gear.parentElement) {
+  const gp = gear && (gear.parentElement ?? gear.parentNode ?? gear.parent);
+  if (gear && gp) {
     const row = document.createElement('div');
     row.className = 'utility-row';
     gear.after(row);
