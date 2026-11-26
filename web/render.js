@@ -502,14 +502,14 @@ const QUALITY = {high: {rings: 160, sides: 40, stars: true, bloom: true, dpr: 2}
 // for EVERY normal frame, so the frozen chase path below is bit-identical to before this hook
 // existed (frozen-test invariant). Only the crash replay sets frame.cam = {side: true}.
 // Per-cut camera rig (spec 26.5.1): standoff (tube wall is at 100) + optional telephoto fovy.
-const CRASH_CAM_KINDS = {side: {dist: 120}, top: {dist: 320}, front: {dist: 90, fovy: 28}};
+const CRASH_CAM_KINDS = {side: {dist: 120}, top: {dist: 320}, front: {dist: 112, fovy: 36, roll: -6}};
 export function resolveCamOverride(frame) {
   const c = frame && frame.cam;
   if (!c) return null;
   const kind = (c.side === true) ? 'side' : (typeof c.kind === 'string' ? c.kind : null);
   if (!Object.prototype.hasOwnProperty.call(CRASH_CAM_KINDS, kind)) return null;
   const rig = CRASH_CAM_KINDS[kind];
-  return {kind, dist: Number.isFinite(c.dist) && c.dist > 40 ? c.dist : rig.dist, fovy: Number.isFinite(c.fovy) ? c.fovy : rig.fovy};
+  return {kind, dist: Number.isFinite(c.dist) && c.dist > 40 ? c.dist : rig.dist, fovy: Number.isFinite(c.fovy) ? c.fovy : rig.fovy, roll: Number.isFinite(c.roll) ? c.roll : rig.roll};
 }
 
 export function createRenderer(opts = {}) {
@@ -843,12 +843,17 @@ export function createRenderer(opts = {}) {
         eye = [shipX + 45, shipY + camOv.dist, camOv.dist * 0.15];
         target = [shipX, shipY - 6, -12];
       } else if (camOv.kind === 'front') {
-        // Hero shot: low 3/4 in front of the ship, looking UP through the see-through floor grid at
-        // the ship's belly with the collision asteroid landing behind it on screen. The wireframe art
-        // reads best at the game's own lens (telephoto turned the tube into empty grid).
+        // Hero shot (owner R57: wider, asteroid in frame, cinematic). Placed MORE side-on and just
+        // high so the collision asteroid (which flies between a straight-ahead cam and the ship) does
+        // NOT occlude the ship: we look ACROSS the corridor. The inbound asteroid and the receding
+        // wireframe ribs both sit on the far side; the ship clears the asteroid vertically.
+        // PORTRAIT framing constraint: the HORIZONTAL half-FOV is ~half the vertical one, so the
+        // ship MUST stay near the view axis or it leaves the frame (v4/v5 learned this). Cinematic
+        // breadth comes from a wider lens (36), lower height looking up at the arc, and dutch roll.
         const s2 = (sx >= 0 ? 1 : -1);
-        eye = [shipX + s2 * camOv.dist * 0.8, shipY - camOv.dist * 0.45, -camOv.dist * 0.8];
-        target = [shipX, shipY + 2, 0];
+        eye = [shipX + s2 * camOv.dist * 0.8, shipY - camOv.dist * 0.35, -camOv.dist * 0.8];
+        target = [shipX, shipY + 2, -8];
+        if (Number.isFinite(camOv.roll)) roll += camOv.roll * DEG;
       } else {
         eye = [shipX + d, shipY + camOv.dist * 0.1, camOv.dist * 0.3];
         target = [cMid[0] + sx * 0.4, shipY, -camOv.dist * 0.4];
