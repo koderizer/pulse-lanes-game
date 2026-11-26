@@ -480,14 +480,85 @@ body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *:
 #settings-dialog .icon svg { color: #eef1ff; }
 #settings-dialog .primary { text-transform: uppercase; letter-spacing: .1em; font: 700 12px/1 var(--mono, ui-monospace, monospace); }
 /* R51.4b: lay the volume group on one shared baseline (svg, slider, value in one row). */
-#music-control .tile.volume label { display: contents; }
-#music-control .tile.volume svg { order: 0; }
-#music-control .tile.volume input[type=range] { order: 1; }
-#music-control .tile.volume output { order: 2; }
 #music-control .tile.volume, #music-control .tile.song { align-items: center; }
 #music-control select { margin: 0; }
 #music-control #song-credit { display: none; }
 #music-control #song-status { margin: 0; font-size: 9px; line-height: 1.2; }
+
+/* R53: space high-techno retro radio redesign. Left = a rotary volume dial (the real
+   #set-volume range input stays underneath, hidden but focusable/draggable/scrollable); the
+   song tile becomes a "radio face" (speaker icon + marquee of the full title + magenta value,
+   over a restyled #set-song "station strip"). index.html is untouched; all of this targets JS-
+   built nodes (app.js buildMusicCombo). */
+#music-control .tile.volume.dial-tile {
+  flex: none; width: 54px; height: 54px; position: relative; padding: 0; align-self: center;
+}
+#music-control .dial-tile label {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; white-space: nowrap; clip: rect(0, 0, 0, 0);
+}
+#music-control .dial-tile label span { display: inline; } /* the sole accessible-name carrier now */
+#music-control .dial {
+  position: absolute; inset: 0; border-radius: 50%; pointer-events: none;
+  background: conic-gradient(from -135deg, var(--cyan) calc(var(--v, .8) * 270deg), rgba(255, 255, 255, .08) 0);
+  box-shadow: inset 0 0 6px rgba(0, 0, 0, .65), 0 0 10px rgba(105, 226, 211, .35);
+}
+#music-control .dial .tick {
+  position: absolute; left: 50%; top: 3px; width: 2px; height: 6px; margin-left: -1px;
+  background: rgba(255, 255, 255, .22); border-radius: 1px; transform-origin: 50% 24px;
+}
+#music-control .dial .tick.on { background: var(--cyan); box-shadow: 0 0 4px var(--cyan); }
+#music-control .dial-led {
+  position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px;
+  border-radius: 50%; background: var(--mag); box-shadow: 0 0 6px var(--mag), 0 0 2px #fff;
+  transform: rotate(-135deg) translateY(-20px);
+}
+#music-control .dial-input {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: grab;
+  -webkit-appearance: none; appearance: none; touch-action: none;
+}
+#music-control .dial-tile:focus-within .dial {
+  box-shadow: 0 0 0 3px var(--cyan), inset 0 0 6px rgba(0, 0, 0, .65), 0 0 14px rgba(105, 226, 211, .6);
+}
+
+#music-control .tile.song.radio-face { flex-direction: column; align-items: stretch; gap: 4px; }
+#music-control .radio-face .face-display {
+  display: flex; align-items: center; gap: 6px; min-width: 0; padding: 3px 7px;
+  border: 1px solid rgba(105, 226, 211, .28); border-radius: 7px;
+  background: rgba(5, 8, 20, .55); box-shadow: inset 0 0 8px rgba(0, 0, 0, .55);
+}
+#music-control .face-display svg { width: 14px; height: 14px; flex: none; }
+#music-control .face-display output { flex: none; font-size: 11px; }
+#music-control .marquee-track { flex: 1; min-width: 0; overflow: hidden; position: relative; white-space: nowrap; }
+#music-control .marquee-text {
+  display: inline-block; font: 700 11px/1.3 var(--mono, ui-monospace, monospace); color: #eef1ff;
+  will-change: transform;
+}
+#music-control .marquee-track.scrolling .marquee-text { animation: pl-marquee 35s linear infinite; }
+@keyframes pl-marquee {
+  0%, 8% { transform: translateX(0); }
+  50% { transform: translateX(calc(-1 * var(--overflow, 0px))); }
+  92%, 100% { transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #music-control .marquee-text { animation: none !important; }
+}
+/* the marquee must not fight a screen-reader / sighted user editing the station picker */
+#music-control .radio-face:focus-within .marquee-text { animation-play-state: paused; }
+/* R53.1 (PM phone QA): the visible title lives ONLY in the marquee. The station <select>
+   becomes a transparent overlay over the whole face so a tap anywhere opens the native
+   picker; the old second visible line (select showing the same title) was a duplicate. */
+#music-control .radio-face { position: relative; }
+#music-control .radio-face .face-display { pointer-events: none; }
+#music-control .radio-face #set-song {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0;
+  appearance: none; -webkit-appearance: none;
+  background: transparent; border: none; border-radius: 7px;
+  color: transparent; font-size: 1px; -webkit-text-fill-color: transparent;
+}
+#music-control .radio-face:focus-within #set-song { outline: 1px solid rgba(105, 226, 211, .7); outline-offset: -1px; }
+#music-control .marquee-text { border-bottom: 1px dotted rgba(105, 226, 211, .35); }
+/* R53: reserved for future source chips (local|radio|...); intentionally empty today. */
+#music-control .source-chips:empty { display: none; }
 
 /* R51.5: dialog buttons read as black on the dark panel - lift them to the button palette with
    a visible border and hover glow (same look as the lobby buttons owners see elsewhere). */

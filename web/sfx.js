@@ -12,8 +12,29 @@
 // Spec 26.4 (FB3-WEB4): app.js also hands this module the sim's destroying events
 // [t, 6, id, code, pickup_kind, amount]; destroyed(kind) voices explode plus the energy ping of
 // the dropped pickup. Same gate (music.ready()) and the same per-voice teardown as laser/rocket.
+//
+// Spec 26.4.3 (FB3-WEB18 R54): four more voices, same discipline, each gated by music.ready()
+// AND a separate per-frame budget (frame()/grantNewVoice(), NEW_VOICE_FRAME_CAP) so a laggy
+// render frame that replays several sim ticks can never machine-gun these four. fire()/destroyed()
+// keep their own unlimited, exactly-1-per-event behavior (frozen by song_probe S-2/S-4): the cap
+// is scoped to the newly added voices only, never to the pre-existing weapon/pickup cues.
+//   hop(dir):        lane change accepted, [t, 1, lane, lane+-1] (app.js: curr.lane !== prev.lane).
+//   boost():         boost accepted; the sim emits no success event (only [t, 6, 1] on refusal), so
+//                    the observable is state's boost_until rising (app.js already used this to
+//                    count runBoosts; R54 reuses the exact same edge).
+//   wallCrash():     the ship pinned against the tunnel's circular travel-radius clamp (doMove in
+//                    both sim modules: vx/vy are forced to 0 when the next position would leave the
+//                    travel radius). Neither sim exports that radius or a dedicated event, so the
+//                    honest observable app.js reads from the state/input rows it already holds is:
+//                    held lateral stick input (sx/sy != 0) while velocity reads [0, 0] this tick.
+//                    Debounced by app.js to one voice per continuous contact.
+//   gameOverBoom():  the terminal collision frame, voiced BEFORE music.quiet() silences the run.
 
 export const SFX_CODES = Object.freeze({laser: 1, rocket: 2});
+// R54: voices from hop/boost/wallCrash/gameOverBoom share one per-frame budget so a frame that
+// replays several ticks (lag catch-up) cannot machine-gun them. app.js calls frame() once per
+// rendered animation frame, before any tick runs. fire()/destroyed() are NOT metered by this.
+const NEW_VOICE_FRAME_CAP = 4;
 // Energy ping pitch per pickup tier (spec 26.4.1, R46 B-2): minerals rise small -> normal -> large
 // as root, major third and fifth (0 / 386 / 702 cents); the gem is a distinct two-tone figure that
 // starts an octave above the root (above mineral_large) and rises a fourth (2, then 2.6667).
@@ -31,6 +52,18 @@ const LASER = {gain: 0.3, attack: 0.004, length: 0.14, from: 1800, to: 240};
 const ROCKET = {gain: 0.6, attack: 0.03, length: 0.5, cutoffFrom: 260, cutoffTo: 3400, q: 1.4, thump: 70};
 const EXPLODE = {gain: 0.55, attack: 0.004, length: 0.42, cutoffFrom: 2400, cutoffTo: 140, q: 0.8, thump: 52};
 const ENERGY = {gain: 0.2, attack: 0.003, length: 0.16, base: 1320, gap: 0.075};
+// R54 B-1: a 60ms direction-pitched blip. 'left' reads as the UP tone, 'right' as the DOWN tone
+// (an arbitrary, presentation-only mapping of the app's own hop direction strings; see takeHop()).
+const HOP = {gain: 0.18, attack: 0.003, length: 0.06, up: 520, down: 390, glide: 1.08};
+// R54 B-2: 250ms rising sweep (saw) plus a noise whoosh through a rising-cutoff lowpass.
+const BOOST = {gain: 0.35, attack: 0.015, length: 0.25, from: 200, to: 900, cutoffFrom: 900, cutoffTo: 3200, q: 1.1};
+// R54 B-3: a dull 180ms thud, deliberately softer/lower than EXPLODE (cutoff ceiling 700 vs 2400,
+// gain 0.4 vs 0.55) so a wall contact never reads as an asteroid kill.
+const WALL = {gain: 0.4, attack: 0.006, length: 0.18, from: 90, to: 45, cutoffFrom: 700, cutoffTo: 160, q: 0.7};
+// R54 B-4: the biggest sound in the game - a long (900ms) EXPLODE variant: lower sub thump
+// (~70 -> 36 Hz vs EXPLODE's 104 -> 52 Hz), a longer noise tail and a higher ceiling gain (0.55,
+// the EXPLODE ceiling itself) so it is clearly distinct from, and bigger than, an asteroid kill.
+const GAMEOVER = {gain: 0.55, length: 0.9, cutoffFrom: 2600, cutoffTo: 90, q: 0.7, thumpFrom: 70, thumpTo: 36};
 const NOISE_SECONDS = 0.6;
 
 // Deterministic white noise (xorshift32), so the whoosh needs no randomness source.
@@ -47,6 +80,19 @@ export class Sfx {
     this.music = music;
     this.noise = null;        // AudioBuffer, built lazily on the first rocket of a live context
     this.noiseContext = null;
+    this.newVoiceBudget = NEW_VOICE_FRAME_CAP; // R54: hop/boost/wallCrash/gameOverBoom only
+  }
+  // R54: call once per rendered animation frame, before any tick of that frame runs (app.js's
+  // frame(), second statement). Refills the shared budget for the four new voices.
+  frame() {
+    this.newVoiceBudget = NEW_VOICE_FRAME_CAP;
+  }
+  // True (and consumes one slot) iff a new-voice call may proceed this frame. The 5th+ such call
+  // in one frame is dropped (returns false): no node is created, nothing queued for later.
+  grantNewVoice() {
+    if (this.newVoiceBudget <= 0) return false;
+    this.newVoiceBudget--;
+    return true;
   }
   // Called once per processed tick with the row before (prev) and after (curr) the tick.
   // Returns the weapon code fired on this tick (0 when none) after voicing it.
@@ -189,5 +235,152 @@ export class Sfx {
     thump.start(now); thump.stop(now + 0.2);
     thump.onended = () => { thump.disconnect(); tenv.disconnect(); };
     return 2;
+  }
+  // R54 B-1: lane hop accepted (app.js: curr.lane !== prev.lane after an attempted hop). A short
+  // square blip with a tiny upward glide; pitch alone carries direction (no stereo panning).
+  // dir: the app's own hop direction string ('left' reads UP, 'right' reads DOWN).
+  hop(dir) {
+    if (!this.music.ready()) return 0;
+    if (!this.grantNewVoice()) return 0;
+    try {
+      const {context, gain} = this.music;
+      const now = context.currentTime, end = now + HOP.length;
+      const base = dir === 'left' ? HOP.up : HOP.down;
+      const osc = context.createOscillator(), env = context.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(base, now);
+      osc.frequency.exponentialRampToValueAtTime(base * HOP.glide, end);
+      env.gain.setValueAtTime(0, now);
+      env.gain.linearRampToValueAtTime(HOP.gain, now + HOP.attack);
+      env.gain.exponentialRampToValueAtTime(0.001, end);
+      osc.connect(env); env.connect(gain);
+      osc.start(now); osc.stop(end + 0.02);
+      osc.onended = () => { osc.disconnect(); env.disconnect(); };
+      return 1;
+    } catch (err) {
+      console.warn('sfx unavailable:', err?.message ?? err);
+    }
+    return 0;
+  }
+  // R54 B-2: boost accepted (app.js: curr.boost_until > prev.boost_until, the same state-row edge
+  // the run's runBoosts counter already uses). Rising sawtooth sweep plus a noise whoosh.
+  boost() {
+    if (!this.music.ready()) return 0;
+    if (!this.grantNewVoice()) return 0;
+    try {
+      const {context, gain} = this.music;
+      const now = context.currentTime, end = now + BOOST.length;
+      const osc = context.createOscillator(), env = context.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(BOOST.from, now);
+      osc.frequency.exponentialRampToValueAtTime(BOOST.to, end);
+      env.gain.setValueAtTime(0, now);
+      env.gain.linearRampToValueAtTime(BOOST.gain, now + BOOST.attack);
+      env.gain.exponentialRampToValueAtTime(0.001, end);
+      osc.connect(env); env.connect(gain);
+      osc.start(now); osc.stop(end + 0.02);
+      osc.onended = () => { osc.disconnect(); env.disconnect(); };
+      let started = 1;
+      if (typeof context.createBiquadFilter === 'function') {
+        const src = context.createBufferSource(), filter = context.createBiquadFilter(), nenv = context.createGain();
+        src.buffer = this.noiseFor(context);
+        filter.type = 'lowpass';
+        filter.Q.value = BOOST.q;
+        filter.frequency.setValueAtTime(BOOST.cutoffFrom, now);
+        filter.frequency.exponentialRampToValueAtTime(BOOST.cutoffTo, end);
+        nenv.gain.setValueAtTime(0, now);
+        nenv.gain.linearRampToValueAtTime(BOOST.gain * 0.5, now + 0.02);
+        nenv.gain.exponentialRampToValueAtTime(0.001, end);
+        src.connect(filter); filter.connect(nenv); nenv.connect(gain);
+        src.start(now); src.stop(end + 0.02);
+        src.onended = () => { src.disconnect(); filter.disconnect(); nenv.disconnect(); };
+        started++;
+      }
+      return started;
+    } catch (err) {
+      console.warn('sfx unavailable:', err?.message ?? err);
+    }
+    return 0;
+  }
+  // R54 B-3: the ship held against the tunnel's circular travel-radius clamp (see the module
+  // header for the observable). A dull thud, deliberately softer than EXPLODE.
+  wallCrash() {
+    if (!this.music.ready()) return 0;
+    if (!this.grantNewVoice()) return 0;
+    try {
+      const {context, gain} = this.music;
+      const now = context.currentTime, end = now + WALL.length;
+      const osc = context.createOscillator(), env = context.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(WALL.from, now);
+      osc.frequency.exponentialRampToValueAtTime(WALL.to, end);
+      env.gain.setValueAtTime(0, now);
+      env.gain.linearRampToValueAtTime(WALL.gain, now + WALL.attack);
+      env.gain.exponentialRampToValueAtTime(0.001, end);
+      osc.connect(env); env.connect(gain);
+      osc.start(now); osc.stop(end + 0.02);
+      osc.onended = () => { osc.disconnect(); env.disconnect(); };
+      let started = 1;
+      if (typeof context.createBiquadFilter === 'function') {
+        const src = context.createBufferSource(), filter = context.createBiquadFilter(), nenv = context.createGain();
+        src.buffer = this.noiseFor(context);
+        filter.type = 'lowpass';
+        filter.Q.value = WALL.q;
+        filter.frequency.setValueAtTime(WALL.cutoffFrom, now);
+        filter.frequency.exponentialRampToValueAtTime(WALL.cutoffTo, now + WALL.length * 0.6);
+        nenv.gain.setValueAtTime(0, now);
+        nenv.gain.linearRampToValueAtTime(WALL.gain * 0.6, now + 0.008);
+        nenv.gain.exponentialRampToValueAtTime(0.001, now + WALL.length * 0.8);
+        src.connect(filter); filter.connect(nenv); nenv.connect(gain);
+        src.start(now); src.stop(now + WALL.length);
+        src.onended = () => { src.disconnect(); filter.disconnect(); nenv.disconnect(); };
+        started++;
+      }
+      return started;
+    } catch (err) {
+      console.warn('sfx unavailable:', err?.message ?? err);
+    }
+    return 0;
+  }
+  // R54 B-4: the terminal collision frame. A long EXPLODE variant; app.js voices this BEFORE
+  // stopRun()'s music.quiet() silences the run, so the gate is still open for it.
+  gameOverBoom() {
+    if (!this.music.ready()) return 0;
+    if (!this.grantNewVoice()) return 0;
+    try {
+      const {context, gain} = this.music;
+      const now = context.currentTime, end = now + GAMEOVER.length;
+      let started = 0;
+      if (typeof context.createBiquadFilter === 'function') {
+        const src = context.createBufferSource(), filter = context.createBiquadFilter(), env = context.createGain();
+        src.buffer = this.noiseFor(context);
+        filter.type = 'lowpass';
+        filter.Q.value = GAMEOVER.q;
+        filter.frequency.setValueAtTime(GAMEOVER.cutoffFrom, now);
+        filter.frequency.exponentialRampToValueAtTime(GAMEOVER.cutoffTo, end);
+        env.gain.setValueAtTime(0, now);
+        env.gain.linearRampToValueAtTime(GAMEOVER.gain, now + 0.01);
+        env.gain.exponentialRampToValueAtTime(0.001, end);
+        src.connect(filter); filter.connect(env); env.connect(gain);
+        src.start(now); src.stop(end + 0.02);
+        src.onended = () => { src.disconnect(); filter.disconnect(); env.disconnect(); };
+        started++;
+      }
+      const thump = context.createOscillator(), tenv = context.createGain();
+      thump.type = 'sine';
+      thump.frequency.setValueAtTime(GAMEOVER.thumpFrom, now);
+      thump.frequency.exponentialRampToValueAtTime(GAMEOVER.thumpTo, now + 0.5);
+      tenv.gain.setValueAtTime(0, now);
+      tenv.gain.linearRampToValueAtTime(GAMEOVER.gain, now + 0.012);
+      tenv.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+      thump.connect(tenv); tenv.connect(gain);
+      thump.start(now); thump.stop(now + 0.85);
+      thump.onended = () => { thump.disconnect(); tenv.disconnect(); };
+      started++;
+      return started;
+    } catch (err) {
+      console.warn('sfx unavailable:', err?.message ?? err);
+    }
+    return 0;
   }
 }

@@ -56,6 +56,10 @@ let pendingReload = false; // R49: a new service worker took over while a run wa
 // last entry's [sx, sy, fire level]; the level persists in the sim without entries (27.1.1).
 // fireTap / fireRepress: pending edges kept for the next tick (holdFire / liftFire below).
 let hops = [], fireHeld = 0, fireTap = false, fireRepress = false, firePointer = null, boosts = 0, lastSent = [0, 0, 0];
+// R54 wallCrash debounce: true while the ship sits pinned against the tunnel's travel-radius
+// clamp (held lateral input, velocity read as [0, 0]; see sfx.js header). Reset on every run
+// start/stop so a new run never inherits a stale contact from the previous one.
+let wallContactActive = false;
 // pl-v3 run plumbing (spec 21). runRuleset picks the button range: bit3 boost exists only for
 // pl-v3 (buttons 0..15); a pl-v2 run keeps 0..7. scoreMap is the base pl-map-1 (HUD tempo, score
 // voice); `map` is what the renderer draws, for pl-v3 the base loops repeated per cycle (R35.4,
@@ -163,6 +167,7 @@ function recordRun() {
 function stopRun() {
   recordRun();
   running = false; hops = []; releaseFire(); boosts = 0; accumulator = 0; previousFrame = null;
+  wallContactActive = false;
   pause.runEnded();
   music.quiet(); song.pause();
 }
@@ -187,6 +192,7 @@ function updateLobby() {
   const vol = volumeOf(s);
   $('set-volume').value = String(vol);
   $('set-volume-value').textContent = String(vol);
+  syncVolumeDial(vol); // R53: keep the rotary dial visual in lock-step with the real input
   renderShipStats(); // R50.2: the stats grid tracks the selected ship
   if (!save) { $('history').textContent = 'Save could not be loaded. Import a valid save or choose New empty save.'; return; }
   const best = save.runs.reduce((score, run) => run.ruleset_id === 'pl-v2' && run.terminal_reason !== 'abandoned' ? Math.max(score, run.score) : score, 0);
@@ -313,6 +319,58 @@ function tileOf(el) {
   }
   return el;
 }
+// R53: space high-techno retro radio redesign of the Music combo's inner. The real
+// #set-volume range input stays the single state owner (hidden under the dial, synced both
+// ways via syncVolumeDial/onVolumeInput above); #set-song stays a real, functional <select>
+// restyled as a tappable station strip. Nothing here invents sim data or touches index.html -
+// every node is built by JS, exactly like the existing R50/R51 lobby-v2 code.
+function buildMusicCombo(volumeTile, songTileEl) {
+  // ---- dial side: relocate the existing speaker svg + value output onto the face (below),
+  // leave the accessible label text in place but visually hidden (clip, not display:none, so
+  // the input keeps its accessible name), and build the rotary knob visual fresh.
+  const volLabel = volumeTile.querySelector('label');
+  const volSvg = volLabel ? volLabel.querySelector('svg') : null;
+  const volOutput = $('set-volume-value');
+  const volInput = $('set-volume');
+  volumeTile.classList.add('dial-tile');
+  const dial = document.createElement('div');
+  dial.className = 'dial';
+  dial.setAttribute('aria-hidden', 'true');
+  dialTicks = [];
+  for (let i = 0; i <= 10; i++) {
+    const tick = document.createElement('i');
+    tick.className = 'tick';
+    tick.style.transform = `rotate(${-135 + (i / 10) * 270}deg)`;
+    dial.append(tick);
+    dialTicks.push(tick);
+  }
+  dialLed = document.createElement('i');
+  dialLed.className = 'dial-led';
+  dial.append(dialLed);
+  dialEl = dial;
+  if (volLabel) volLabel.after(dial); // sits between the (hidden) label and the real input
+  else volumeTile.append(dial);
+  volInput.classList.add('dial-input'); // the real input stays last: on top, catching input
+
+  // ---- face side: a small "face-display" strip (speaker icon + marquee + magenta value),
+  // inserted into the tree first (R53 harness lesson), then the pre-existing svg/output moved in.
+  songTileEl.classList.add('radio-face');
+  const display = document.createElement('div');
+  display.className = 'face-display';
+  const firstChild = songTileEl.firstElementChild;
+  if (firstChild) firstChild.before(display); else songTileEl.append(display);
+  const track = document.createElement('div');
+  track.className = 'marquee-track';
+  const text = document.createElement('span');
+  text.className = 'marquee-text';
+  track.append(text);
+  display.append(track);
+  if (volSvg) track.before(volSvg);
+  display.append(volOutput);
+  marqueeTrack = track; marqueeText = text;
+  showSong(); // now that marqueeText exists, fill it with the current station's label
+  syncVolumeDial(volumeOf(settingsNow()));
+}
 function buildLobbyV2() {
   const seedEl = $('seed'); // capture before the data rows go; the serial keeps this very element
   const data = lobby.querySelector('.data');
@@ -331,12 +389,23 @@ function buildLobbyV2() {
     const combo = document.createElement('div');
     combo.id = 'music-control';
     combo.className = 'music-combo';
+    // R53: reserved for future album-playlist/Spotify-connect source switching. Only local
+    // (synth/file) playback exists today, so this names the one real source and nothing else;
+    // no disabled buttons or fake chips for sources that don't exist yet.
+    combo.setAttribute('data-source', 'local');
     const head = document.createElement('span');
     head.className = 'music-label';
     head.textContent = 'Music';
     combo.append(head);
     volumeTile.before(combo); // place the combo first, then move the tiles into it
     combo.append(volumeTile, songTileEl);
+    // R53: a reserved, empty row for future source chips (e.g. local|radio) - intentionally
+    // carries no children today; see data-source above.
+    const chips = document.createElement('div');
+    chips.className = 'source-chips';
+    chips.setAttribute('aria-hidden', 'true');
+    combo.append(chips);
+    buildMusicCombo(volumeTile, songTileEl);
   }
   const vault = lobby.querySelector('.vault');
   if (vault) {
@@ -452,6 +521,10 @@ function buildModePicker() {
 // never in the pilot save, an export, the challenge preset or the replay. `local` (a file from this
 // device) is never stored: a reload returns to the stored value. Presentation only.
 let songTile = null;
+// R53: radio-face marquee elements (built in buildMusicCombo, set once at init).
+let marqueeTrack = null, marqueeText = null;
+// R53: volume dial visual elements + active pointer drag (built in buildMusicCombo).
+let dialEl = null, dialTicks = [], dialLed = null, dialDrag = null;
 function storeSong(key, value) {
   try { localStorage.setItem(key, value); } catch { /* the choice still applies until the page closes */ }
 }
@@ -470,6 +543,24 @@ function showSong() {
   const track = SONGS.find(t => t.id === info.selection);
   $('song-credit').textContent = track ? songCredit(track) : info.selection === 'local' ? (song.localFile?.name ?? '') : '';
   $('song-status').textContent = info.state === 'failed' ? SONG_FAILED_TEXT : '';
+  // R53: the radio face marquee mirrors the full label of the currently-selected station (the
+  // same text the <select> option already carries); data-song-id is a reserved hook for future
+  // album-playlist/Spotify-connect work and carries no behavior today.
+  const select = $('set-song');
+  const opt = [...(select?.children ?? [])].find(c => c.value === select.value) ?? null;
+  if (marqueeText) marqueeText.textContent = opt ? opt.textContent : '';
+  if (songTile) songTile.setAttribute('data-song-id', info.selection);
+  updateMarquee();
+}
+function updateMarquee() {
+  // R53: only scroll when the full title overflows the visible track; prefers-reduced-motion and
+  // the select-focused pause live in CSS (lobby.css), this just measures and flags overflow.
+  if (!marqueeTrack || !marqueeText) return;
+  const trackWidth = marqueeTrack.getBoundingClientRect?.().width || 0;
+  const textWidth = marqueeText.getBoundingClientRect?.().width || 0;
+  const overflow = Math.max(0, textWidth - trackWidth);
+  marqueeText.style.setProperty('--overflow', `${overflow}px`);
+  marqueeTrack.classList.toggle('scrolling', overflow > 2);
 }
 function buildSongTile() {
   const make = (tag, props = {}, attrs = {}) => {
@@ -609,15 +700,55 @@ function changeSetting(key, raw) {
   applySettingsToOutputs();
   updateLobby();
 }
-$('set-volume').addEventListener('input', event => { // changeSetting before unlockAudio (AU-7)
+function onVolumeInput() { // changeSetting before unlockAudio (AU-7)
   const prev = volumeOf(settingsNow());
-  changeSetting('volume', event.target.value);
+  changeSetting('volume', $('set-volume').value);
   applySettingsToOutputs();
   const vol = volumeOf(settingsNow());
   $('set-volume-value').textContent = String(vol);
   if (prev === 0 && vol > 0) unlockAudio();
   else if (running && !pause.isPaused() && vol > 0) unlockAudio();
+}
+$('set-volume').addEventListener('input', onVolumeInput);
+// R53: the rotary dial drives the same real input, so every drag/wheel step calls onVolumeInput()
+// directly (no synthetic DOM event construction - Node's own Event class refuses this harness's
+// dispatchEvent, which sets .target on the event object) and updateLobby() keeps the knob synced.
+function stepVolume(delta) {
+  if (!delta) return;
+  const input = $('set-volume');
+  const next = Math.min(10, Math.max(0, Number(input.value) + delta));
+  if (String(next) === input.value) return;
+  input.value = String(next);
+  onVolumeInput();
+}
+function syncVolumeDial(vol) {
+  if (!dialEl) return;
+  const v = Math.min(10, Math.max(0, Number(vol) || 0));
+  dialEl.style.setProperty('--v', String(v / 10));
+  const angle = -135 + (v / 10) * 270;
+  if (dialLed) dialLed.style.transform = `rotate(${angle}deg) translateY(-20px)`;
+  for (let i = 0; i < dialTicks.length; i++) dialTicks[i].classList.toggle('on', i <= v);
+}
+$('set-volume').addEventListener('pointerdown', event => {
+  event.preventDefault();
+  $('set-volume').focus();
+  dialDrag = {pointerId: event.pointerId, x: event.clientX, y: event.clientY, value: Number($('set-volume').value)};
 });
+document.addEventListener('pointermove', event => {
+  if (!dialDrag || event.pointerId !== dialDrag.pointerId) return;
+  // ~8px per step; right or up raises the volume, left or down lowers it.
+  const delta = Math.round(((event.clientX - dialDrag.x) - (event.clientY - dialDrag.y)) / 8);
+  const input = $('set-volume');
+  const next = Math.min(10, Math.max(0, dialDrag.value + delta));
+  if (String(next) !== input.value) { input.value = String(next); onVolumeInput(); }
+});
+for (const type of ['pointerup', 'pointercancel']) {
+  document.addEventListener(type, event => { if (dialDrag && event.pointerId === dialDrag.pointerId) dialDrag = null; });
+}
+$('set-volume').addEventListener('wheel', event => {
+  event.preventDefault();
+  stepVolume(event.deltaY < 0 ? 1 : -1);
+}, {passive: false});
 
 // ------------------------------------------------------------------ run lifecycle
 function start(nextSeed) {
@@ -641,7 +772,7 @@ function start(nextSeed) {
   prevState = currState = game.state(); view = game.view();
   trail = [{p: currState.processed, state: currState, view}];
   recorded = false; running = true; hops = []; releaseFire(); boosts = 0; runBoosts = 0; lastSent = [0, 0, 0];
-  accumulator = 0; previousFrame = null; eventCursor = 0;
+  accumulator = 0; previousFrame = null; eventCursor = 0; wallContactActive = false;
   setRocketLatch(false); // a run starts on the laser (ammo starts at 0)
   // R52: rewind, never reset. reset() suspends the context, and the unlockAudio() two statements
   // below resumes it in the same gesture stack; on an engine where suspend() lands on a later task
@@ -669,6 +800,10 @@ function ensureCourse(L) {
 }
 
 function finishRun() {
+  // R54 B-4: voice the game-over boom BEFORE stopRun() silences the run (its quiet() call flips
+  // quietMode synchronously, so music.ready() would refuse right after). Collision only: an
+  // abandoned or 'complete' ending is not a crash and stays silent here.
+  if (currState && currState.status === 'ended' && currState.terminal_reason === 'collision') sfx.gameOverBoom();
   stopRun();
   const s = currState;
   if (!s || s.status !== 'ended' || s.terminal_reason === 'abandoned') return openLobby();
@@ -824,8 +959,19 @@ function tickOnce() {
   currState = game.step(1, entries);
   if (v3) {
     ensureCourse(currState.loop);
-    if (currState.boost_until > prevState.boost_until) runBoosts++; // boost_until moves only on a boost
+    // R54 B-2: boost accepted. boost_until only moves on an accepted boost (the sim emits no
+    // success event, only the refusal [t, 6, 1]); runBoosts already used this exact edge.
+    if (currState.boost_until > prevState.boost_until) { runBoosts++; sfx.boost(); }
   }
+  // R54 B-1: lane hop accepted, [t, 1, lane, lane+-1] - `hop` is the direction attempted above
+  // (takeHop), and the lane only moves when the sim accepted it (a refusal leaves lane unchanged).
+  if (hop && currState.lane !== prevState.lane) sfx.hop(hop);
+  // R54 B-3: wall contact (see sfx.js header for the observable). Debounced to one voice per
+  // continuous contact via wallContactActive; both rulesets share the same travel-radius clamp.
+  const wallHit = (stick[0] !== 0 || stick[1] !== 0) &&
+    currState.velocity[0] === 0 && currState.velocity[1] === 0;
+  if (wallHit && !wallContactActive) sfx.wallCrash();
+  wallContactActive = wallHit;
   view = game.view();
   trail.push({p: currState.processed, state: currState, view});
   if (trail.length > TRAIL_TICKS) trail.shift();
@@ -1314,6 +1460,7 @@ function drawPickups(now) {
 // ------------------------------------------------------------------ frame loop
 function frame(timestamp) {
   song.sync({now: timestamp, running, paused: pause.isPaused(), hidden: document.hidden, muted: settingsNow().mute});
+  sfx.frame(); // R54: refill the hop/boost/wallCrash/gameOverBoom burst budget once per frame
   if (running && !pause.isPaused() && !document.hidden) {
     if (previousFrame !== null) accumulator += Math.min(MAX_FRAME_MS, Math.max(0, timestamp - previousFrame));
     previousFrame = timestamp;
