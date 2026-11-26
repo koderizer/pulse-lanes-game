@@ -221,6 +221,17 @@ export class Music {
     this.latestTick = null;
     this.lastBeat = -1;
   }
+  // A run is starting and its own unlocking gesture is next in this same stack. The beat clock
+  // restarts from scratch, so nothing from the previous run can be scheduled against the new
+  // run's ticks, and nothing is silenced: quiet() is the silencing primitive, and asking the
+  // engine to suspend one task before asking it to resume is what left the context suspended for
+  // a whole run (R52). The previous run already quiet()ed on its own end path.
+  rewind() {
+    this.ev('rewind');
+    this.pendingTick = null;
+    this.latestTick = null;
+    this.lastBeat = -1;
+  }
   ev(op, extra) {
     if (this.evLog.length >= 60) this.evLog.shift();
     this.evLog.push([op, this.context?.state ?? '-', extra ?? '']);

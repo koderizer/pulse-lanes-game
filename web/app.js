@@ -643,7 +643,10 @@ function start(nextSeed) {
   recorded = false; running = true; hops = []; releaseFire(); boosts = 0; runBoosts = 0; lastSent = [0, 0, 0];
   accumulator = 0; previousFrame = null; eventCursor = 0;
   setRocketLatch(false); // a run starts on the laser (ammo starts at 0)
-  music.reset(); song.pause(); voice.setMap(scoreMap);
+  // R52: rewind, never reset. reset() suspends the context, and the unlockAudio() two statements
+  // below resumes it in the same gesture stack; on an engine where suspend() lands on a later task
+  // the suspend wins and the whole run plays silent. The previous run's quiet() already silenced.
+  music.rewind(); song.pause(); voice.setMap(scoreMap);
   beginSession(); song.startRun(); unlockAudio(); persist();
   renderer.setCourse(map, course);
   if (rendererKind === 'webgl2') shipMirror.setCourse(map); // R44.2: same reset as render.js
