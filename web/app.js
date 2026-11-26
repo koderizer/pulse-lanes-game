@@ -350,7 +350,21 @@ function buildMusicCombo(volumeTile, songTileEl) {
   dialEl = dial;
   if (volLabel) volLabel.after(dial); // sits between the (hidden) label and the real input
   else volumeTile.append(dial);
-  volInput.classList.add('dial-input'); // the real input stays last: on top, catching input
+  volInput.classList.add('dial-input'); // state owner; now pointer-transparent (R55.1, CSS)
+  // R55.1 (owner feedback: touch could barely trigger a change): an invisible native range
+  // starts a drag only when the touch lands exactly on its invisible thumb. The visible knob
+  // itself now owns pointer interaction (68px touch area in lobby.css, pointer-events:auto);
+  // every step writes the real input and calls onVolumeInput() directly - synthetic events are
+  // forbidden (Node's Event target is frozen). Keyboard arrows stay on the real input.
+  dial.addEventListener('pointerdown', event => {
+    event.preventDefault?.();
+    dialDrag = {pointerId: event.pointerId, x: event.clientX, y: event.clientY, value: Number($('set-volume').value)};
+    try { dial.setPointerCapture?.(event.pointerId); } catch { /* synthetic/inactive pointer ids: the document-level move/up handlers still drive the drag */ }
+  });
+  dial.addEventListener('wheel', event => {
+    event.preventDefault?.();
+    stepVolume(event.deltaY < 0 ? 1 : -1);
+  }, {passive: false});
 
   // ---- face side: a small "face-display" strip (speaker icon + marquee + magenta value),
   // inserted into the tree first (R53 harness lesson), then the pre-existing svg/output moved in.
@@ -729,11 +743,9 @@ function syncVolumeDial(vol) {
   if (dialLed) dialLed.style.transform = `rotate(${angle}deg) translateY(-20px)`;
   for (let i = 0; i < dialTicks.length; i++) dialTicks[i].classList.toggle('on', i <= v);
 }
-$('set-volume').addEventListener('pointerdown', event => {
-  event.preventDefault();
-  $('set-volume').focus();
-  dialDrag = {pointerId: event.pointerId, x: event.clientX, y: event.clientY, value: Number($('set-volume').value)};
-});
+// R55.1: the drag now STARTS on the visible dial (bound in buildMusicCombo; the invisible native
+// range only started drags when touched exactly on its invisible thumb). These document-level
+// handlers complete the gesture from wherever the pointer wanders; wheel stays on the dial too.
 document.addEventListener('pointermove', event => {
   if (!dialDrag || event.pointerId !== dialDrag.pointerId) return;
   // ~8px per step; right or up raises the volume, left or down lowers it.
@@ -743,12 +755,8 @@ document.addEventListener('pointermove', event => {
   if (String(next) !== input.value) { input.value = String(next); onVolumeInput(); }
 });
 for (const type of ['pointerup', 'pointercancel']) {
-  document.addEventListener(type, event => { if (dialDrag && event.pointerId === dialDrag.pointerId) dialDrag = null; });
+  document.addEventListener(type, event => { if (dialDrag && event.pointerId !== dialDrag.pointerId) return; dialDrag = null; });
 }
-$('set-volume').addEventListener('wheel', event => {
-  event.preventDefault();
-  stepVolume(event.deltaY < 0 ? 1 : -1);
-}, {passive: false});
 
 // ------------------------------------------------------------------ run lifecycle
 function start(nextSeed) {
@@ -800,10 +808,167 @@ function ensureCourse(L) {
 }
 
 function finishRun() {
+  // R54 B-4 / R55.2: the boom voices on the TERMINAL collision frame itself, then the crash
+  // replay runs (boom tail still audible - quiet() is deferred with the modal), then completeRun
+  // silences and opens the card. 'complete'/'abandoned' endings are not crashes: straight path.
+  const crashed = currState && currState.status === 'ended' && currState.terminal_reason === 'collision';
+  if (crashed) { sfx.gameOverBoom(); globalThis.__crashBoomed = true; } // once per run, either path
+  if (crashed && startCrashReplay()) {
+    // Loop halt only: recordRun/quiet()/card all belong to completeRun after the replay. The boom
+    // already fired on this frame - flag it so completeRun does not voice it a second time.
+    globalThis.__crashBoomed = true;
+    running = false; accumulator = 0; previousFrame = null;
+    return;
+  }
+  completeRun();
+}
+
+// ---------------------------------------------------------------- R55.2 crash replay (R55 brief)
+// Side-camera post-mortem: when the run ends in a collision, a canvas overlay replays the last
+// ~0.9s of the recorded trail at slow motion with the tunnel axis running left-to-right (world
+// lateral position -> screen vertical, progress -> screen horizontal), ending in the particle
+// burst synced with the boom that already fired on the collision tick. Data sources are ONLY
+// things the app already holds: `trail` ({p, state, view} per tick, pushed by the tick loop) and
+// the terminal view rows. The frozen renderers are untouched; this is its own canvas.
+// Fail-open by design: no canvas ctx, any exception, the 3s cap, or a tap all jump straight to
+// completeRun() - the player is never stranded behind the scene.
+const CRASH_SPAN_TICKS = 24;         // full trail ring (TRAIL_TICKS = 24 = 0.4s at 60 tps)
+const CRASH_SLOWMO = 0.2;            // 0.4s of world time plays back as ~2s at 20% speed
+const CRASH_HOLD_MS = 350;           // settle time on the burst before the card (x6 under ?dbgcrash=1 for QA)
+const CRASH_CAP_MS = 3000;           // hard wall-clock cap (fail-open)
+const CRASH_DISABLED = (() => {
+  try { return new URLSearchParams(location.search).get('nocrash') === '1'; } catch { return false; }
+})();
+let crashCtl = null;
+let DBG_HOLD_MULT = 1; // x6 under ?dbgcrash=1 so QA can shoot the burst window
+globalThis.__crashPhase = 'idle'; // probe-visible state machine: idle | replay | done
+try { // QA/tooling knob (same family as ?renderer=fallback2d): ?dbgcrash=1 exposes a manual
+  // trigger for the replay so the real-canvas paint path can be exercised without a death.
+  if (new URLSearchParams(location.search).get('dbgcrash') === '1') {
+    globalThis.__dbgCrash = () => { DBG_HOLD_MULT = 6; return startCrashReplay(); };
+  }
+} catch { /* knob is best-effort */ }
+
+function crashReducedMotion() {
+  try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; }
+}
+
+function startCrashReplay() {
+  if (CRASH_DISABLED || crashReducedMotion() || !trail.length || crashCtl) return false;
+  const layer = document.createElement('canvas');
+  layer.id = 'crash-scene';
+  const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
+  const w = Math.max(240, (globalThis.innerWidth || 390));
+  const h = Math.max(240, (globalThis.innerHeight || 844));
+  layer.width = Math.round(w * dpr); layer.height = Math.round(h * dpr);
+  const ctx = layer.getContext ? layer.getContext('2d') : null;
+  document.body.append(layer);
+  const span = trail.slice(Math.max(0, trail.length - CRASH_SPAN_TICKS));
+  const maxPos = Math.max(1, ...span.map(t => Math.hypot(t.state.position?.[0] ?? 0, t.state.position?.[1] ?? 0)));
+  const duration = (span.length / TICKS_PER_SECOND / CRASH_SLOWMO) * 1000 + CRASH_HOLD_MS * DBG_HOLD_MULT;
+  const seed = {s: 0x9E3779B9}; // deterministic burst (xorshift, same idiom as sfx noise)
+  const nextRand = () => { let s = seed.s; s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; seed.s = s; return s / 4294967296; };
+  const burst = [];
+  for (let i = 0; i < 26; i++) {
+    const a = nextRand() * Math.PI * 2, sp = 60 + nextRand() * 260;
+    burst.push({a, sp, hue: i % 3, born: nextRand() * 80});
+  }
+  crashCtl = {phase: 'replay', raf: 0, timer: 0, layer, done: false, startMs: 0, skip: null};
+  globalThis.__crashPhase = 'replay';
+  const playDur = duration - CRASH_HOLD_MS * DBG_HOLD_MULT; // progression time; the hold shows the burst
+  globalThis.__crashDbg = {duration, playDur, mult: DBG_HOLD_MULT, spanLen: span.length}; // QA telemetry
+  const paint = ctx ? (t) => {
+    const u = Math.min(1, t / playDur); // ship progression; burst owns the HOLD window
+    try {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      const cy = h * 0.52, wallY = h * 0.26, trackX0 = w * 0.08, trackX1 = w * 0.62;
+      ctx.strokeStyle = 'rgba(105, 226, 211, .8)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(0, cy - wallY); ctx.lineTo(w, cy - wallY); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, cy + wallY); ctx.lineTo(w, cy + wallY); ctx.stroke();
+      ctx.strokeStyle = 'rgba(105, 226, 211, .12)';
+      for (let gx = 0; gx < 12; gx++) { const x = (gx / 11) * w; ctx.beginPath(); ctx.moveTo(x, cy - wallY); ctx.lineTo(x, cy + wallY); ctx.stroke(); }
+      const idx = Math.min(span.length - 1, Math.floor(u * (span.length - 1)));
+      const hitIdx = span.length - 1;
+      const shipX = trackX0 + u * (trackX1 - trackX0);
+      const lastView = span[hitIdx].view;
+      for (const row of lastView?.asteroids ?? []) {
+        const [, , , z, hp] = row;
+        if (hp <= 0) continue;
+        const rx = shipX + 40 + ((z % 90000) / 90000) * (w - trackX1 - 60);
+        if (rx < 0 || rx > w) continue;
+        const rr = Math.max(4, Math.min(26, (9000 + (84 - (row[5] ?? 60)) * 450) / 6000));
+        ctx.fillStyle = 'rgba(255, 91, 214, .28)';
+        ctx.beginPath(); ctx.arc(rx, cy + ((row[3] ?? 0) / 100000) * wallY * 0.6, rr, 0, Math.PI * 2); ctx.fill();
+      }
+      if (u < 1 || idx < hitIdx) {
+        const t = span[idx];
+        const py = cy + ((t.state.position?.[1] ?? 0) / maxPos) * (wallY - 14);
+        ctx.save(); ctx.translate(shipX, py);
+        ctx.fillStyle = '#69e2d3'; ctx.strokeStyle = 'rgba(238,241,255,.9)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-10, -9); ctx.lineTo(-6, 0); ctx.lineTo(-10, 9); ctx.closePath();
+        ctx.fill(); ctx.stroke(); ctx.restore();
+      }
+      if (u >= 1) { // collision moment: particles live through the hold window
+        const age = t - playDur;
+        const ex = shipX, ey = cy + ((span[hitIdx].state.position?.[1] ?? 0) / maxPos) * (wallY - 14);
+        for (const p of burst) {
+          const life = 0.7 * DBG_HOLD_MULT; // under ?dbgcrash=1 the burst stretches to fill the QA hold
+          const t2 = (age - p.born) / 1000;
+          if (t2 <= 0 || t2 > life) continue;
+          const dist = Math.min(240, p.sp * t2), fade = 1 - t2 / life;
+          ctx.fillStyle = p.hue === 0 ? `rgba(105,226,211,${fade})` : p.hue === 1 ? `rgba(255,91,214,${fade})` : `rgba(255,215,130,${fade})`;
+          ctx.beginPath(); ctx.arc(ex + Math.cos(p.a) * dist, ey + Math.sin(p.a) * dist, 2.5 * fade + 1, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+    } catch (err) {
+      /* a missing canvas API never blocks the card; the timer ends the replay anyway.
+         First error surfaces on __crashPaintErr for probes/QA (blank-canvas detection). */
+      if (globalThis.__crashPaintErr === undefined) globalThis.__crashPaintErr = String(err?.stack ?? err).slice(0, 300);
+    }
+  } : null;
+  const finish = () => endCrash();
+  crashCtl.skip = () => finish();
+  document.addEventListener('pointerdown', crashCtl.skip);
+  document.addEventListener('keydown', crashCtl.skip);
+  crashCtl.timer = setTimeout(finish, CRASH_CAP_MS * (DBG_HOLD_MULT === 1 ? 1 : 3));
+  const animate = ts => {
+    if (!crashCtl || crashCtl.done) return;
+    try {
+      if (!crashCtl.startMs) crashCtl.startMs = ts;
+      const t = ts - crashCtl.startMs;
+      if (paint) paint(t);
+      if (t >= duration) { finish(); return; }
+      crashCtl.raf = requestAnimationFrame(animate);
+    } catch { finish(); }
+  };
+  crashCtl.raf = requestAnimationFrame(animate);
+  return true;
+}
+
+function endCrash() {
+  const ctl = crashCtl;
+  if (!ctl || ctl.done) return;
+  ctl.done = true;
+  clearTimeout(ctl.timer);
+  cancelAnimationFrame(ctl.raf);
+  if (ctl.skip) { document.removeEventListener?.('pointerdown', ctl.skip); document.removeEventListener?.('keydown', ctl.skip); }
+  ctl.layer?.remove?.();
+  crashCtl = null;
+  globalThis.__crashPhase = 'done';
+  completeRun();
+}
+
+// The old end-of-run tail: silence the run, record it, open the card (or the lobby).
+function completeRun() {
   // R54 B-4: voice the game-over boom BEFORE stopRun() silences the run (its quiet() call flips
   // quietMode synchronously, so music.ready() would refuse right after). Collision only: an
   // abandoned or 'complete' ending is not a crash and stays silent here.
-  if (currState && currState.status === 'ended' && currState.terminal_reason === 'collision') sfx.gameOverBoom();
+  // R55.2: on the replay path the boom already fired at the collision tick; sfx has no dedupe,
+  // so voice it here only when no replay ran (startCrashReplay returning false keeps today's
+  // exact behavior: reduced motion, ?nocrash, no trail).
+  if (!globalThis.__crashBoomed && currState && currState.status === 'ended' && currState.terminal_reason === 'collision') sfx.gameOverBoom();
+  globalThis.__crashBoomed = false;
   stopRun();
   const s = currState;
   if (!s || s.status !== 'ended' || s.terminal_reason === 'abandoned') return openLobby();

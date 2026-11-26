@@ -55,8 +55,12 @@ const ENERGY = {gain: 0.2, attack: 0.003, length: 0.16, base: 1320, gap: 0.075};
 // R54 B-1: a 60ms direction-pitched blip. 'left' reads as the UP tone, 'right' as the DOWN tone
 // (an arbitrary, presentation-only mapping of the app's own hop direction strings; see takeHop()).
 const HOP = {gain: 0.18, attack: 0.003, length: 0.06, up: 520, down: 390, glide: 1.08};
-// R54 B-2: 250ms rising sweep (saw) plus a noise whoosh through a rising-cutoff lowpass.
-const BOOST = {gain: 0.35, attack: 0.015, length: 0.25, from: 200, to: 900, cutoffFrom: 900, cutoffTo: 3200, q: 1.1};
+// R54 B-2 / R55.3: rising sweep (saw) plus a noise whoosh through a rising-cutoff lowpass, and a
+// fading noise tail on top (see BOOST).
+// R55.3 (owner feedback: "too short, needs a longer whoosh for better feel"): the sweep grew from
+// 0.25s to a 0.6s gentler rise and a dedicated fading noise tail (0.3s, lowpass closing 2600->400
+// Hz) layers on top, so the voice reads as a ~0.9s whoosh. Gain stays at the R54 ceiling 0.35.
+export const BOOST = {gain: 0.35, attack: 0.02, length: 0.6, from: 200, to: 900, cutoffFrom: 900, cutoffTo: 3200, q: 1.1, tail: 0.3, tailGain: 0.16};
 // R54 B-3: a dull 180ms thud, deliberately softer/lower than EXPLODE (cutoff ceiling 700 vs 2400,
 // gain 0.4 vs 0.55) so a wall contact never reads as an asteroid kill.
 const WALL = {gain: 0.4, attack: 0.006, length: 0.18, from: 90, to: 45, cutoffFrom: 700, cutoffTo: 160, q: 0.7};
@@ -294,6 +298,22 @@ export class Sfx {
         src.connect(filter); filter.connect(nenv); nenv.connect(gain);
         src.start(now); src.stop(end + 0.02);
         src.onended = () => { src.disconnect(); filter.disconnect(); nenv.disconnect(); };
+        started++;
+      }
+      // R55.3: the whoosh tail - a second noise voice starting late, lowpass closing down, fading
+      // out over BOOST.tail. Same discipline: routed through music.gain, self-disconnecting.
+      if (typeof context.createBufferSource === 'function' && typeof context.createBiquadFilter === 'function') {
+        const tailStart = end - BOOST.length * 0.2, tailEnd = end + BOOST.tail;
+        const tsrc = context.createBufferSource(), tf = context.createBiquadFilter(), tenv = context.createGain();
+        tsrc.buffer = this.noiseFor(context);
+        tf.type = 'lowpass';
+        tf.frequency.setValueAtTime(2600, tailStart);
+        tf.frequency.exponentialRampToValueAtTime(400, tailEnd);
+        tenv.gain.setValueAtTime(BOOST.tailGain, tailStart);
+        tenv.gain.exponentialRampToValueAtTime(0.001, tailEnd);
+        tsrc.connect(tf); tf.connect(tenv); tenv.connect(gain);
+        tsrc.start(tailStart); tsrc.stop(tailEnd + 0.02);
+        tsrc.onended = () => { tsrc.disconnect(); tf.disconnect(); tenv.disconnect(); };
         started++;
       }
       return started;

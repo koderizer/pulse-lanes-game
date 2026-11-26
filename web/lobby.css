@@ -491,14 +491,18 @@ body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *:
    over a restyled #set-song "station strip"). index.html is untouched; all of this targets JS-
    built nodes (app.js buildMusicCombo). */
 #music-control .tile.volume.dial-tile {
-  flex: none; width: 54px; height: 54px; position: relative; padding: 0; align-self: center;
+  /* R55.1: 68px touch target (>= the 64px usability floor); the 54px knob is inset 7px. */
+  flex: none; width: 68px; height: 68px; position: relative; padding: 0; align-self: center;
 }
 #music-control .dial-tile label {
   position: absolute; width: 1px; height: 1px; overflow: hidden; white-space: nowrap; clip: rect(0, 0, 0, 0);
 }
 #music-control .dial-tile label span { display: inline; } /* the sole accessible-name carrier now */
 #music-control .dial {
-  position: absolute; inset: 0; border-radius: 50%; pointer-events: none;
+  position: absolute; inset: 7px; border-radius: 50%;
+  /* R55.1: the knob itself takes the drag (the invisible native input underneath no longer
+     intercepts touch - its invisible thumb was nearly impossible to hit). */
+  pointer-events: auto; touch-action: none; cursor: grab;
   background: conic-gradient(from -135deg, var(--cyan) calc(var(--v, .8) * 270deg), rgba(255, 255, 255, .08) 0);
   box-shadow: inset 0 0 6px rgba(0, 0, 0, .65), 0 0 10px rgba(105, 226, 211, .35);
 }
@@ -513,8 +517,10 @@ body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *:
   transform: rotate(-135deg) translateY(-20px);
 }
 #music-control .dial-input {
-  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: grab;
-  -webkit-appearance: none; appearance: none; touch-action: none;
+  /* R55.1: state owner + keyboard target only: transparent to pointer (the dial handles drags),
+     still tabbable so arrow keys keep working and :focus-within draws the ring. */
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0;
+  pointer-events: none; -webkit-appearance: none; appearance: none; touch-action: none;
 }
 #music-control .dial-tile:focus-within .dial {
   box-shadow: 0 0 0 3px var(--cyan), inset 0 0 6px rgba(0, 0, 0, .65), 0 0 14px rgba(105, 226, 211, .6);

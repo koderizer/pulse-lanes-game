@@ -4,3 +4,8 @@
 #lobby #set-volume-value{font:700 12px/1 var(--mono);color:var(--mag);margin-top:-2px}
 #build-tag{position:fixed;right:8px;bottom:6px;font-size:10px;color:#5a637c;opacity:.7;pointer-events:none;z-index:3}
 #song-credits{margin:0;padding:0 12px 10px;font-size:10px;line-height:1.5;color:#7a839c;max-width:100vw;overflow-wrap:anywhere;position:absolute;left:0;right:0;bottom:0;pointer-events:none}
+
+/* R55.2: crash replay overlay (created by app.js at collision; removed when the card opens).
+   Opaque backdrop over the frozen game view; pointer-events:none because the skip listener
+   lives on document and must never be blocked by the canvas itself. */
+#crash-scene{position:fixed;inset:0;width:100%;height:100%;z-index:40;pointer-events:none;background:radial-gradient(120% 90% at 50% 45%,rgba(10,14,32,.92),rgba(3,5,15,.97))}
