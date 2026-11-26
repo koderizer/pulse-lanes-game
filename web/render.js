@@ -501,10 +501,15 @@ const QUALITY = {high: {rings: 160, sides: 40, stars: true, bloom: true, dpr: 2}
 // R56 spec 26.4.4 (crash replay side camera): additive hook only. resolveCamOverride returns null
 // for EVERY normal frame, so the frozen chase path below is bit-identical to before this hook
 // existed (frozen-test invariant). Only the crash replay sets frame.cam = {side: true}.
+// Per-cut camera rig (spec 26.5.1): standoff (tube wall is at 100) + optional telephoto fovy.
+const CRASH_CAM_KINDS = {side: {dist: 120}, top: {dist: 320}, front: {dist: 90, fovy: 28}};
 export function resolveCamOverride(frame) {
   const c = frame && frame.cam;
-  if (!c || c.side !== true) return null;
-  return {dist: Number.isFinite(c.dist) && c.dist > 40 ? c.dist : 120}; // just outside the 100-unit tube wall
+  if (!c) return null;
+  const kind = (c.side === true) ? 'side' : (typeof c.kind === 'string' ? c.kind : null);
+  if (!Object.prototype.hasOwnProperty.call(CRASH_CAM_KINDS, kind)) return null;
+  const rig = CRASH_CAM_KINDS[kind];
+  return {kind, dist: Number.isFinite(c.dist) && c.dist > 40 ? c.dist : rig.dist, fovy: Number.isFinite(c.fovy) ? c.fovy : rig.fovy};
 }
 
 export function createRenderer(opts = {}) {
@@ -830,16 +835,31 @@ export function createRenderer(opts = {}) {
       // only x/y. The side camera therefore stands on the X axis, outside the wall nearest the ship,
       // a touch behind the ship plane, aiming slightly down the barrel so the tube reads horizontal.
       const cMid = track.centre(lane, sShip, [0, 0, 0]);
-      const d = camOv.dist * (sx >= 0 ? 1 : -1);
+      const d = camOv.dist * (sx >= 0 ? 1 : -1); // outside the wall nearest the ship
       const shipX = cMid[0] + sx;
-      eye = [shipX + d, shipY + camOv.dist * 0.1, camOv.dist * 0.3];
-      target = [cMid[0] + sx * 0.4, shipY, -camOv.dist * 0.4];
+      if (camOv.kind === 'top') {
+        // Near-overhead crane (offset so fwd never parallels up): the tube reads as a horizontal band
+        // and the whole asteroid field of the crash window lays out under it.
+        eye = [shipX + 45, shipY + camOv.dist, camOv.dist * 0.15];
+        target = [shipX, shipY - 6, -12];
+      } else if (camOv.kind === 'front') {
+        // Hero shot: low 3/4 in front of the ship, looking UP through the see-through floor grid at
+        // the ship's belly with the collision asteroid landing behind it on screen. The wireframe art
+        // reads best at the game's own lens (telephoto turned the tube into empty grid).
+        const s2 = (sx >= 0 ? 1 : -1);
+        eye = [shipX + s2 * camOv.dist * 0.8, shipY - camOv.dist * 0.45, -camOv.dist * 0.8];
+        target = [shipX, shipY + 2, 0];
+      } else {
+        eye = [shipX + d, shipY + camOv.dist * 0.1, camOv.dist * 0.3];
+        target = [cMid[0] + sx * 0.4, shipY, -camOv.dist * 0.4];
+      }
       roll = 0;
     }
     const fwd = normalize([target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]]);
     const R = axisAngle(fwd, roll), up = [R[1][0], R[1][1], R[1][2]];
     const aspect = w / h;
-    const fovy = fovyFor(aspect) + cues.fovKick;
+    let fovy = fovyFor(aspect) + cues.fovKick;
+    if (camOv && Number.isFinite(camOv.fovy)) fovy = camOv.fovy * DEG + cues.fovKick; // telephoto on the front cut
     const vis = visDepth();
     perspective(P, fovy, aspect, 0.5, vis + CAM_BACK + 200);
     lookAt(V, eye, target, up);

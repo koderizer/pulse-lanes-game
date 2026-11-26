@@ -70,7 +70,7 @@ let runRuleset = 'pl-v3', runMode = 'death', scoreMap = null, courseLoops = 0, r
 // Per-tick {p, state, view} rows already produced by step/view, newest last (presentation only).
 // A frame that runs several ticks hands all of them to the renderer, so no fire or short-lived
 // rocket row is lost between frames.
-const TRAIL_TICKS = 24;
+const TRAIL_TICKS = 72; // 1.2s at 60 tps; sized for the 3-cut crash replay (spec 26.5.1)
 let trail = [];
 // Spec 26.1.3 / 26.2.3 rocket latch: the single source of truth (R and the ammo badge toggle it,
 // hud.js only paints it). While on, every pl-v3 input entry ORs in bit4 (16, rocket selected for
@@ -827,15 +827,18 @@ function finishRun() {
 // Side-camera post-mortem (spec 26.4.4): when the run ends in a collision, the LIVE renderer
 // replays the last 0.4s of the recorded trail at 20% speed under a side camera - the real 3D
 // ship, tube loop and the exact asteroid field - ending in the renderer's own explosion, then
-// completeRun() opens the card. The trail ring (TRAIL_TICKS = 24) is the data source; the
+// completeRun() opens the card. 1.2s of world time at 20% speed = ~6.0s of screen time, cut
+// across three cameras (side -> top -> front; the crash lands in the front close-up). The trail
+// ring (TRAIL_TICKS = 72) is the data source; the
 // renderer side of the feature is additive (resolveCamOverride/resetFx, spec 26.4.4) so normal
 // frames stay bit-identical on the frozen chase path.
 // Fail-open by design: any exception, the cap timer, or a tap all jump straight to
 // completeRun() - the player is never stranded behind the scene.
-const CRASH_SPAN_TICKS = 24;         // full trail ring (TRAIL_TICKS = 24 = 0.4s at 60 tps)
+const CRASH_SPAN_TICKS = 72;         // full trail ring (TRAIL_TICKS = 72 = 1.2s at 60 tps)
+const CRASH_CUTS = ['side', 'top', 'front']; // three-camera edit (spec 26.5.1), equal tick ranges
 const CRASH_SLOWMO = 0.2;            // 0.4s of world time plays back as ~2s at 20% speed
 const CRASH_HOLD_MS = 350;           // settle time on the burst before the card (x6 under ?crashdbg=1 for QA)
-const CRASH_CAP_MS = 3000;           // hard wall-clock cap (fail-open)
+const CRASH_FAILSAFE_MS = 1500;      // wall-clock margin past duration (fail-open for a stalled rAF loop)
 const CRASH_DISABLED = (() => {
   try { return new URLSearchParams(location.search).get('nocrash') === '1'; } catch { return false; }
 })();
@@ -873,13 +876,13 @@ function startCrashReplay() {
   try { renderer.resetFx?.(); } catch { /* replay still plays without the re-arm hook */ }
   const playDur = (span.length / TICKS_PER_SECOND / CRASH_SLOWMO) * 1000;
   const duration = playDur + CRASH_HOLD_MS * DBG_HOLD_MULT;
-  crashCtl = {phase: 'replay', span, t0: 0, timer: 0, layer, done: false, armed: false, skip: null, playDur, duration};
+  crashCtl = {phase: 'replay', span, t0: 0, timer: 0, layer, done: false, armed: false, cut: -1, skip: null, playDur, duration};
   globalThis.__crashPhase = 'replay';
-  globalThis.__crashDbg = {duration, playDur, mult: DBG_HOLD_MULT, spanLen: span.length, renderer: rendererKind, armed: undefined};
+  globalThis.__crashDbg = {duration, playDur, mult: DBG_HOLD_MULT, spanLen: span.length, renderer: rendererKind, cuts: CRASH_CUTS.slice(), cut: undefined, armed: undefined, armCut: undefined};
   crashCtl.skip = () => endCrash();
   document.addEventListener?.('pointerdown', crashCtl.skip);
   document.addEventListener?.('keydown', crashCtl.skip);
-  crashCtl.timer = setTimeout(endCrash, CRASH_CAP_MS * (DBG_HOLD_MULT === 1 ? 1 : 3));
+  crashCtl.timer = setTimeout(endCrash, duration + CRASH_FAILSAFE_MS); // only fires if rAF stalls (hidden tab)
   return true;
 }
 
@@ -904,14 +907,17 @@ function crashRows(timestamp) {
   const i0 = Math.min(ctl.span.length - 1, Math.floor(f));
   const i1 = Math.min(ctl.span.length - 1, i0 + 1);
   const row0 = ctl.span[i0], row1 = ctl.span[i1];
+  // Equal-tick camera edit: side (approach) -> top (loop field) -> front (impact close-up).
+  const cut = Math.min(CRASH_CUTS.length - 1, Math.floor(u * CRASH_CUTS.length));
+  if (ctl.cut !== cut) { ctl.cut = cut; if (globalThis.__crashDbg) globalThis.__crashDbg.cut = cut; }
   const terminal = row1.state && row1.state.status === 'ended';
   const arm = terminal && !ctl.armed;
-  if (arm) { ctl.armed = true; if (globalThis.__crashDbg) globalThis.__crashDbg.armed = Math.round(t); }
+  if (arm) { ctl.armed = true; if (globalThis.__crashDbg) { globalThis.__crashDbg.armed = Math.round(t); globalThis.__crashDbg.armCut = cut; } }
   const rows = {
     prev: row0.state, curr: row1.state, alpha: i0 === i1 ? 1 : f - i0,
     view: row1.view, trail: ctl.span, paused: false, now: timestamp,
   };
-  if (rendererKind === 'webgl2') rows.cam = {side: true}; // WebGL only; the 2D fallback has no camera
+  if (rendererKind === 'webgl2') rows.cam = {kind: CRASH_CUTS[cut]}; // WebGL only; the 2D fallback has no camera
   if (arm) rows.replayArm = true; // one-shot: detonate the stored wall asteroid + ship burst again
   return rows;
 }
