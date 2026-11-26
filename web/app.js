@@ -823,29 +823,31 @@ function finishRun() {
   completeRun();
 }
 
-// ---------------------------------------------------------------- R55.2 crash replay (R55 brief)
-// Side-camera post-mortem: when the run ends in a collision, a canvas overlay replays the last
-// ~0.9s of the recorded trail at slow motion with the tunnel axis running left-to-right (world
-// lateral position -> screen vertical, progress -> screen horizontal), ending in the particle
-// burst synced with the boom that already fired on the collision tick. Data sources are ONLY
-// things the app already holds: `trail` ({p, state, view} per tick, pushed by the tick loop) and
-// the terminal view rows. The frozen renderers are untouched; this is its own canvas.
-// Fail-open by design: no canvas ctx, any exception, the 3s cap, or a tap all jump straight to
+// ---------------------------------------------------------------- R55.2/R56 crash replay
+// Side-camera post-mortem (spec 26.4.4): when the run ends in a collision, the LIVE renderer
+// replays the last 0.4s of the recorded trail at 20% speed under a side camera - the real 3D
+// ship, tube loop and the exact asteroid field - ending in the renderer's own explosion, then
+// completeRun() opens the card. The trail ring (TRAIL_TICKS = 24) is the data source; the
+// renderer side of the feature is additive (resolveCamOverride/resetFx, spec 26.4.4) so normal
+// frames stay bit-identical on the frozen chase path.
+// Fail-open by design: any exception, the cap timer, or a tap all jump straight to
 // completeRun() - the player is never stranded behind the scene.
 const CRASH_SPAN_TICKS = 24;         // full trail ring (TRAIL_TICKS = 24 = 0.4s at 60 tps)
 const CRASH_SLOWMO = 0.2;            // 0.4s of world time plays back as ~2s at 20% speed
-const CRASH_HOLD_MS = 350;           // settle time on the burst before the card (x6 under ?dbgcrash=1 for QA)
+const CRASH_HOLD_MS = 350;           // settle time on the burst before the card (x6 under ?crashdbg=1 for QA)
 const CRASH_CAP_MS = 3000;           // hard wall-clock cap (fail-open)
 const CRASH_DISABLED = (() => {
   try { return new URLSearchParams(location.search).get('nocrash') === '1'; } catch { return false; }
 })();
 let crashCtl = null;
-let DBG_HOLD_MULT = 1; // x6 under ?dbgcrash=1 so QA can shoot the burst window
+let DBG_HOLD_MULT = 1; // x6 under ?crashdbg=1 so QA can shoot the burst window
 globalThis.__crashPhase = 'idle'; // probe-visible state machine: idle | replay | done
-try { // QA/tooling knob (same family as ?renderer=fallback2d): ?dbgcrash=1 exposes a manual
+try { // QA/tooling knob (same family as ?renderer=fallback2d): ?crashdbg=1 exposes a manual (NOT ?dbg*,
+  // which arms the R49.2 audio telemetry overlay)
   // trigger for the replay so the real-canvas paint path can be exercised without a death.
-  if (new URLSearchParams(location.search).get('dbgcrash') === '1') {
-    globalThis.__dbgCrash = () => { DBG_HOLD_MULT = 6; return startCrashReplay(); };
+  if (new URLSearchParams(location.search).get('crashdbg') === '1') {
+    DBG_HOLD_MULT = 6; // also stretches a real death's hold so QA can shoot the burst
+    globalThis.__dbgCrash = () => startCrashReplay();
   }
 } catch { /* knob is best-effort */ }
 
@@ -854,96 +856,64 @@ function crashReducedMotion() {
 }
 
 function startCrashReplay() {
+  // R56 spec 26.4.4: the replay runs through the LIVE renderer - the real 3D ship, tube loop and
+  // the exact asteroid field - fed the recorded trail rows in slow motion under a side camera
+  // (frame.cam, additive hook in render.js). The renderer's own collision explode() detonates the
+  // wall asteroid + ship burst again on the replayed terminal frame (replayArm + resetFx re-arm).
+  // The blackout drape hides the rewind jump. Fail-open: the timer or a tap always reaches the card.
   if (CRASH_DISABLED || crashReducedMotion() || !trail.length || crashCtl) return false;
-  const layer = document.createElement('canvas');
-  layer.id = 'crash-scene';
-  const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
-  const w = Math.max(240, (globalThis.innerWidth || 390));
-  const h = Math.max(240, (globalThis.innerHeight || 844));
-  layer.width = Math.round(w * dpr); layer.height = Math.round(h * dpr);
-  const ctx = layer.getContext ? layer.getContext('2d') : null;
-  document.body.append(layer);
   const span = trail.slice(Math.max(0, trail.length - CRASH_SPAN_TICKS));
-  const maxPos = Math.max(1, ...span.map(t => Math.hypot(t.state.position?.[0] ?? 0, t.state.position?.[1] ?? 0)));
-  const duration = (span.length / TICKS_PER_SECOND / CRASH_SLOWMO) * 1000 + CRASH_HOLD_MS * DBG_HOLD_MULT;
-  const seed = {s: 0x9E3779B9}; // deterministic burst (xorshift, same idiom as sfx noise)
-  const nextRand = () => { let s = seed.s; s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; seed.s = s; return s / 4294967296; };
-  const burst = [];
-  for (let i = 0; i < 26; i++) {
-    const a = nextRand() * Math.PI * 2, sp = 60 + nextRand() * 260;
-    burst.push({a, sp, hue: i % 3, born: nextRand() * 80});
+  if (currState && currState.status === 'ended' && span[span.length - 1]?.state !== currState) {
+    span.push({p: currState.processed, state: currState, view}); // the crash tick can sit outside the ring
   }
-  crashCtl = {phase: 'replay', raf: 0, timer: 0, layer, done: false, startMs: 0, skip: null};
+  if (span.length < 2) return false;
+  const layer = document.createElement('div'); // blackout drape; the game canvas paints the scene
+  layer.id = 'crash-scene';
+  document.body.append(layer);
+  try { renderer.resetFx?.(); } catch { /* replay still plays without the re-arm hook */ }
+  const playDur = (span.length / TICKS_PER_SECOND / CRASH_SLOWMO) * 1000;
+  const duration = playDur + CRASH_HOLD_MS * DBG_HOLD_MULT;
+  crashCtl = {phase: 'replay', span, t0: 0, timer: 0, layer, done: false, armed: false, skip: null, playDur, duration};
   globalThis.__crashPhase = 'replay';
-  const playDur = duration - CRASH_HOLD_MS * DBG_HOLD_MULT; // progression time; the hold shows the burst
-  globalThis.__crashDbg = {duration, playDur, mult: DBG_HOLD_MULT, spanLen: span.length}; // QA telemetry
-  const paint = ctx ? (t) => {
-    const u = Math.min(1, t / playDur); // ship progression; burst owns the HOLD window
-    try {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, w, h);
-      const cy = h * 0.52, wallY = h * 0.26, trackX0 = w * 0.08, trackX1 = w * 0.62;
-      ctx.strokeStyle = 'rgba(105, 226, 211, .8)'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(0, cy - wallY); ctx.lineTo(w, cy - wallY); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0, cy + wallY); ctx.lineTo(w, cy + wallY); ctx.stroke();
-      ctx.strokeStyle = 'rgba(105, 226, 211, .12)';
-      for (let gx = 0; gx < 12; gx++) { const x = (gx / 11) * w; ctx.beginPath(); ctx.moveTo(x, cy - wallY); ctx.lineTo(x, cy + wallY); ctx.stroke(); }
-      const idx = Math.min(span.length - 1, Math.floor(u * (span.length - 1)));
-      const hitIdx = span.length - 1;
-      const shipX = trackX0 + u * (trackX1 - trackX0);
-      const lastView = span[hitIdx].view;
-      for (const row of lastView?.asteroids ?? []) {
-        const [, , , z, hp] = row;
-        if (hp <= 0) continue;
-        const rx = shipX + 40 + ((z % 90000) / 90000) * (w - trackX1 - 60);
-        if (rx < 0 || rx > w) continue;
-        const rr = Math.max(4, Math.min(26, (9000 + (84 - (row[5] ?? 60)) * 450) / 6000));
-        ctx.fillStyle = 'rgba(255, 91, 214, .28)';
-        ctx.beginPath(); ctx.arc(rx, cy + ((row[3] ?? 0) / 100000) * wallY * 0.6, rr, 0, Math.PI * 2); ctx.fill();
-      }
-      if (u < 1 || idx < hitIdx) {
-        const t = span[idx];
-        const py = cy + ((t.state.position?.[1] ?? 0) / maxPos) * (wallY - 14);
-        ctx.save(); ctx.translate(shipX, py);
-        ctx.fillStyle = '#69e2d3'; ctx.strokeStyle = 'rgba(238,241,255,.9)'; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-10, -9); ctx.lineTo(-6, 0); ctx.lineTo(-10, 9); ctx.closePath();
-        ctx.fill(); ctx.stroke(); ctx.restore();
-      }
-      if (u >= 1) { // collision moment: particles live through the hold window
-        const age = t - playDur;
-        const ex = shipX, ey = cy + ((span[hitIdx].state.position?.[1] ?? 0) / maxPos) * (wallY - 14);
-        for (const p of burst) {
-          const life = 0.7 * DBG_HOLD_MULT; // under ?dbgcrash=1 the burst stretches to fill the QA hold
-          const t2 = (age - p.born) / 1000;
-          if (t2 <= 0 || t2 > life) continue;
-          const dist = Math.min(240, p.sp * t2), fade = 1 - t2 / life;
-          ctx.fillStyle = p.hue === 0 ? `rgba(105,226,211,${fade})` : p.hue === 1 ? `rgba(255,91,214,${fade})` : `rgba(255,215,130,${fade})`;
-          ctx.beginPath(); ctx.arc(ex + Math.cos(p.a) * dist, ey + Math.sin(p.a) * dist, 2.5 * fade + 1, 0, Math.PI * 2); ctx.fill();
-        }
-      }
-    } catch (err) {
-      /* a missing canvas API never blocks the card; the timer ends the replay anyway.
-         First error surfaces on __crashPaintErr for probes/QA (blank-canvas detection). */
-      if (globalThis.__crashPaintErr === undefined) globalThis.__crashPaintErr = String(err?.stack ?? err).slice(0, 300);
-    }
-  } : null;
-  const finish = () => endCrash();
-  crashCtl.skip = () => finish();
-  document.addEventListener('pointerdown', crashCtl.skip);
-  document.addEventListener('keydown', crashCtl.skip);
-  crashCtl.timer = setTimeout(finish, CRASH_CAP_MS * (DBG_HOLD_MULT === 1 ? 1 : 3));
-  const animate = ts => {
-    if (!crashCtl || crashCtl.done) return;
-    try {
-      if (!crashCtl.startMs) crashCtl.startMs = ts;
-      const t = ts - crashCtl.startMs;
-      if (paint) paint(t);
-      if (t >= duration) { finish(); return; }
-      crashCtl.raf = requestAnimationFrame(animate);
-    } catch { finish(); }
-  };
-  crashCtl.raf = requestAnimationFrame(animate);
+  globalThis.__crashDbg = {duration, playDur, mult: DBG_HOLD_MULT, spanLen: span.length, renderer: rendererKind, armed: undefined};
+  crashCtl.skip = () => endCrash();
+  document.addEventListener?.('pointerdown', crashCtl.skip);
+  document.addEventListener?.('keydown', crashCtl.skip);
+  crashCtl.timer = setTimeout(endCrash, CRASH_CAP_MS * (DBG_HOLD_MULT === 1 ? 1 : 3));
   return true;
+}
+
+// frame() entry: null when no replay is running (normal rows) or the moment it completes -
+// reaching duration ends it SYNCHRONOUSLY (the cap timer is only the fail-open for a stalled
+// rAF loop, e.g. a hidden tab), so the card appears deterministically on the next pumped frame.
+function crashRowsFor(timestamp) {
+  if (!crashCtl || crashCtl.phase !== 'replay') return null;
+  if (crashCtl.t0 && timestamp - crashCtl.t0 >= crashCtl.duration) { endCrash(); return null; }
+  return crashRows(timestamp);
+}
+
+// Rows for frame() while the replay runs (spec 26.4.4): interpolate the recorded trail at
+// CRASH_SLOWMO. prev/curr are the SAME state objects the live renderer consumed at crash time, so
+// ship pose, tube and asteroids reproduce exactly; cam: {side: true} is consumed by render.js only.
+function crashRows(timestamp) {
+  const ctl = crashCtl;
+  if (!ctl.t0) ctl.t0 = timestamp;
+  const t = timestamp - ctl.t0;
+  const u = Math.min(1, t / ctl.playDur);
+  const f = u * (ctl.span.length - 1);
+  const i0 = Math.min(ctl.span.length - 1, Math.floor(f));
+  const i1 = Math.min(ctl.span.length - 1, i0 + 1);
+  const row0 = ctl.span[i0], row1 = ctl.span[i1];
+  const terminal = row1.state && row1.state.status === 'ended';
+  const arm = terminal && !ctl.armed;
+  if (arm) { ctl.armed = true; if (globalThis.__crashDbg) globalThis.__crashDbg.armed = Math.round(t); }
+  const rows = {
+    prev: row0.state, curr: row1.state, alpha: i0 === i1 ? 1 : f - i0,
+    view: row1.view, trail: ctl.span, paused: false, now: timestamp,
+  };
+  if (rendererKind === 'webgl2') rows.cam = {side: true}; // WebGL only; the 2D fallback has no camera
+  if (arm) rows.replayArm = true; // one-shot: detonate the stored wall asteroid + ship burst again
+  return rows;
 }
 
 function endCrash() {
@@ -951,7 +921,6 @@ function endCrash() {
   if (!ctl || ctl.done) return;
   ctl.done = true;
   clearTimeout(ctl.timer);
-  cancelAnimationFrame(ctl.raf);
   if (ctl.skip) { document.removeEventListener?.('pointerdown', ctl.skip); document.removeEventListener?.('keydown', ctl.skip); }
   ctl.layer?.remove?.();
   crashCtl = null;
@@ -1632,9 +1601,9 @@ function frame(timestamp) {
     while (accumulator >= TICK_MS && running) { tickOnce(); accumulator -= TICK_MS; }
   } else previousFrame = null;
   const ended = currState?.status === 'ended';
-  const rows = currState
-    ? {prev: prevState, curr: currState, alpha: ended ? 1 : accumulator / TICK_MS, view, trail, paused: pause.isPaused() || !running, now: timestamp}
-    : {cruise: timestamp / 1000, now: timestamp};
+  const rows = crashRowsFor(timestamp) ?? (currState
+      ? {prev: prevState, curr: currState, alpha: ended ? 1 : accumulator / TICK_MS, view, trail, paused: pause.isPaused() || !running, now: timestamp}
+      : {cruise: timestamp / 1000, now: timestamp});
   const drawRows = rendererKind === 'webgl2' ? webglRows(rows) : fallbackRows(rows); // R44.1, R45.3
   try { renderer.draw(drawRows); }
   catch (err) {

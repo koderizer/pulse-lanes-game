@@ -498,6 +498,15 @@ void main() {
 // ------------------------------------------------------------------ renderer
 const QUALITY = {high: {rings: 160, sides: 40, stars: true, bloom: true, dpr: 2}, low: {rings: 64, sides: 16, stars: false, bloom: false, dpr: 1}};
 
+// R56 spec 26.4.4 (crash replay side camera): additive hook only. resolveCamOverride returns null
+// for EVERY normal frame, so the frozen chase path below is bit-identical to before this hook
+// existed (frozen-test invariant). Only the crash replay sets frame.cam = {side: true}.
+export function resolveCamOverride(frame) {
+  const c = frame && frame.cam;
+  if (!c || c.side !== true) return null;
+  return {dist: Number.isFinite(c.dist) && c.dist > 40 ? c.dist : 120}; // just outside the 100-unit tube wall
+}
+
 export function createRenderer(opts = {}) {
   const canvas = opts.canvas;
   if (!canvas || typeof canvas.getContext !== 'function') throw new Error('webgl2: no canvas');
@@ -623,6 +632,7 @@ export function createRenderer(opts = {}) {
   let particles = [], beams = [];
   let shipLaneF = 1, camLaneF = 1, camLaneVel = 0, shake = 0, flash = [0, 0, 0], effectTime = 0, lastNow = null;
   let lastLane = null, lastFireReady = 0, lastLocked = false, endHandled = false;
+  let endDeleted = new Map(); // crash-consumed live asteroids, restored by resetFx for the replay (spec 26.4.4)
   let lostHandler = typeof opts.onLost === 'function' ? opts.onLost : null;
   const onLost = () => { lostHandler?.(); };
   canvas.addEventListener('webglcontextlost', onLost);
@@ -633,6 +643,7 @@ export function createRenderer(opts = {}) {
     live.clear(); rocketHist = new Map(); lastView = null; lastProcessed = -1;
     particles = []; beams = []; shake = 0; flash = [0, 0, 0];
     lastLane = null; lastFireReady = 0; lastLocked = false; endHandled = false;
+    endDeleted = new Map();
   }
 
   function explode(pos, color, count, speed, size) {
@@ -767,11 +778,11 @@ export function createRenderer(opts = {}) {
       vx = lerp(prev.velocity[0], curr.velocity[0], a);
       lane = curr.lane;
       syncView(frame.view, curr.processed, prev, curr, frame.trail);
-      if (curr.status === 'ended' && !endHandled) {
+      if (curr.status === 'ended' && (!endHandled || frame.replayArm)) {
         endHandled = true;
         if (curr.terminal_reason === 'collision') {
           alive = false;
-          for (const [id, e] of live) if (e.row[3] === curr.terminal_tick && e.row[2] === curr.lane) { explode(e.pos, [1, 0.6, 0.3], 30, 110, 2.4); live.delete(id); }
+          for (const [id, e] of live) if (e.row[3] === curr.terminal_tick && e.row[2] === curr.lane) { explode(e.pos, [1, 0.6, 0.3], 30, 110, 2.4); endDeleted.set(id, e); live.delete(id); }
           if (!reduced) shake = 1;
           flash = reduced ? [0.12, 0.05, 0.02] : [0.55, 0.25, 0.1];
           explode([track.centre(lane, track.sAt(T))[0] + sx, track.centre(lane, track.sAt(T))[1] + sy, 0], [0.4, 1, 0.95], 40, 120, 2);
@@ -803,13 +814,28 @@ export function createRenderer(opts = {}) {
     const cAhead = track.centre(camLaneF, sShip + CAM_AHEAD, [0, 0, 0]);
     shake *= Math.exp(-dt * 4.5);
     const jx = reduced ? 0 : shake * 3.2 * Math.sin(effectTime * 41), jy = reduced ? 0 : shake * 3.2 * Math.sin(effectTime * 37 + 1.3);
-    const eye = [cBack[0] + sx * 0.72 + jx, cBack[1] + sy * 0.72 + CAM_UP + jy + bob, camBack];
+    let eye = [cBack[0] + sx * 0.72 + jx, cBack[1] + sy * 0.72 + CAM_UP + jy + bob, camBack];
     // R-4: floor the eye above the ship. The ship is drawn on the smoothed lane and the sim lane is
     // its hop target; the higher of the two centrelines is the reference, so a hop never dips it.
     const shipY = Math.max(track.centre(shipLaneF, sShip, cA)[1], track.centre(lane, sShip, cB)[1]) + sy;
     eye[1] = Math.max(eye[1], shipY + CAM_MIN_ABOVE);
-    const target = [cAhead[0] + sx * 0.45 + jx * 0.5, cAhead[1] + sy * 0.45 + 5 + jy * 0.5, -CAM_AHEAD];
-    const roll = reduced ? 0 : clamp(camLaneVel * 0.045 + vx / 3750 * 0.1, -0.3, 0.3);
+    let target = [cAhead[0] + sx * 0.45 + jx * 0.5, cAhead[1] + sy * 0.45 + 5 + jy * 0.5, -CAM_AHEAD];
+    let roll = reduced ? 0 : clamp(camLaneVel * 0.045 + vx / 3750 * 0.1, -0.3, 0.3);
+    // R56 spec 26.4.4: side camera for the crash replay. Standing OUTSIDE the tube on the ship's
+    // own side of the lane, the wall it hit reads as the far plane behind the explosion. Roll and
+    // the R-4 eye floor do not apply (no hop/beat motion here); fwd/up derive from the override.
+    const camOv = resolveCamOverride(frame);
+    if (camOv) {
+      // Treadmill geometry: the ship sits at z = 0 and the tube flows toward +z...-z; centre() bends
+      // only x/y. The side camera therefore stands on the X axis, outside the wall nearest the ship,
+      // a touch behind the ship plane, aiming slightly down the barrel so the tube reads horizontal.
+      const cMid = track.centre(lane, sShip, [0, 0, 0]);
+      const d = camOv.dist * (sx >= 0 ? 1 : -1);
+      const shipX = cMid[0] + sx;
+      eye = [shipX + d, shipY + camOv.dist * 0.1, camOv.dist * 0.3];
+      target = [cMid[0] + sx * 0.4, shipY, -camOv.dist * 0.4];
+      roll = 0;
+    }
     const fwd = normalize([target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]]);
     const R = axisAngle(fwd, roll), up = [R[1][0], R[1][1], R[1][2]];
     const aspect = w / h;
@@ -1020,6 +1046,11 @@ export function createRenderer(opts = {}) {
     setSettings(next) { settings = {...settings, ...(next ?? {})}; },
     setSpawnZ(z) { if (Number.isFinite(z) && z > 0) spawnZ = z; },
     // R-1: unknown ids fall back to the default model. Returns the id actually in use.
+    resetFx() { // crash-replay re-arm (spec 26.4.4): the replayed terminal frame must explode again
+      for (const [id, e] of endDeleted) live.set(id, e);
+      endDeleted = new Map();
+      particles = []; beams = []; shake = 0; flash = [0, 0, 0]; endHandled = false; lastProcessed = -1;
+    },
     setShip(modelId) { shipKit = shipKits.get(shipById(modelId).id); return shipKit.model.id; },
     shipId: () => shipKit.model.id,
     visibleDepthMu: () => visDepth() * MU,
