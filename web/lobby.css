@@ -488,3 +488,13 @@ body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *:
 #music-control select { margin: 0; }
 #music-control #song-credit { display: none; }
 #music-control #song-status { margin: 0; font-size: 9px; line-height: 1.2; }
+
+/* R51.5: dialog buttons read as black on the dark panel - lift them to the button palette with
+   a visible border and hover glow (same look as the lobby buttons owners see elsewhere). */
+#settings-dialog .icon {
+  background: #33405e; border: 1px solid #4c5a82; color: #eef1ff;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .06) inset;
+}
+#settings-dialog .icon:hover { background: #3d4c70; border-color: var(--cyan, #69e2d3); }
+#settings-dialog .icon:active { background: #242c46; }
+#settings-dialog .icon[disabled] { opacity: .45; }
