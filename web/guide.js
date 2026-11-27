@@ -165,12 +165,40 @@ export function createGuide({document: doc = globalThis.document, track = guideT
   function closeMenu() { menuOpen = false; menuPanel.hidden = true; menuButton.focus?.(); }
   function cleanup() { viewportApi.dispose(); exitLoop(); menuOpen = false; keyboardReset(); opener?.focus?.(); opener = null; }
   function close() {
+    pendingOpen = 0; trustedOpen = 0;
     if (!dialog.open) return;
     dialog.close(); cleanup();
     // Chrome fires the browser-level Escape close on the NEXT topmost modal after this one
     // closes, so game over gets a cancel in the same press. gameover.js consults this window.
     lastClosedAt = Date.now();
   }
+  function note(label, outcome, source) {
+    try {
+      const trail = (globalThis.__guideOpens ??= []);
+      trail.push({ t: Date.now(), label, outcome, source: source?.id || String(source?.className || source || ''),
+        running: !!doc.body?.classList?.contains('running'), dialogOpen: dialog.open,
+        stack: (new Error()).stack?.split('\n').slice(2, 5).join(' | ') });
+      if (trail.length > 25) trail.shift();
+      const dbg = doc.getElementById('dbg');
+      if (dbg) dbg.textContent += `\nguide-open ${label}:${outcome} from ${source?.id || '?'} running=${doc.body?.classList?.contains('running')}`;
+    } catch { /* telemetry must never block the guide */ }
+  }
+  let openToken = 0, pendingOpen = 0, trustedOpen = 0;
+  function inspectOpen(records) {
+    // oldValue + the next record preserve close/reopen transitions batched in one task.
+    for (let i = 0; i < records.length; i++) {
+      const value = i + 1 < records.length ? records[i + 1].oldValue : dialog.getAttribute('open');
+      if (value === null) { trustedOpen = 0; pendingOpen = 0; }
+      else if (records[i].oldValue === null) { trustedOpen = pendingOpen; pendingOpen = 0; }
+    }
+    if (dialog.open && (!trustedOpen || doc.body?.classList?.contains('running'))) {
+      note('watchdog', 'forced-close', dialog);
+      close();
+    }
+  }
+  const Observer = doc.defaultView?.MutationObserver ?? globalThis.MutationObserver;
+  const watchdog = typeof Observer === 'function' ? new Observer(inspectOpen) : null;
+  watchdog?.observe(dialog, {attributes: true, attributeFilter: ['open'], attributeOldValue: true});
   function keydown(event) {
     if (!dialog.open) return;
     if (event.key === 'Escape') {
@@ -204,20 +232,18 @@ export function createGuide({document: doc = globalThis.document, track = guideT
     open(source = doc.activeElement, label = 'gameover') {
       // R64: full open trail (spec 26.7.10) - every attempt records its origin and state, so a
       // modal seen over gameplay on a remote device is diagnosable from one screenshot.
-      const trail = (globalThis.__guideOpens ??= []);
-      const note = (outcome) => { try {
-        trail.push({ t: Date.now(), label, outcome, source: source?.id || String(source?.className || source || ''),
-          running: !!doc.body?.classList?.contains('running'), dialogOpen: dialog.open,
-          stack: (new Error()).stack?.split('\n').slice(2, 5).join(' | ') });
-        if (trail.length > 25) trail.shift();
-        const dbg = doc.getElementById('dbg');
-        if (dbg) dbg.textContent += `\nguide-open ${label}:${outcome} from ${source?.id || '?'} running=${doc.body?.classList?.contains('running')}`;
-      } catch { /* telemetry must never block the guide */ } };
-      if (dialog.open) { note('blocked-already-open'); return; }
-      if (doc.body?.classList?.contains('running')) { note('blocked-running'); return; } // R63: never over live gameplay
-      note('opened');
-      opener = source; reset(); baseH = 0; dialog.showModal();
-      viewportApi.render({preset: 'idle', assetId: null, text: 'Nix moon'});
+      if (watchdog) inspectOpen(watchdog.takeRecords());
+      if (dialog.open) { note(label, 'blocked-already-open', source); return; }
+      if (doc.body?.classList?.contains('running')) { note(label, 'blocked-running', source); return; } // R63: never over live gameplay
+      opener = source; reset(); baseH = 0;
+      try {
+        // One-use permission for the next closed -> open mutation, never a sticky flag.
+        pendingOpen = ++openToken;
+        dialog.showModal();
+        if (watchdog) inspectOpen(watchdog.takeRecords());
+        viewportApi.render({preset: 'idle', assetId: null, text: 'Nix moon'});
+      } catch (error) { close(); note(label, 'failed', source); throw error; }
+      note(label, 'opened', source);
       input.focus(); keyboardFit(); track('guide_opened', {source: label}); // R61: lobby opener reports 'lobby'
     },
     close,

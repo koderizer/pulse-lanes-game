@@ -12,7 +12,7 @@
   box-sizing: border-box; position: relative;
   width: min(560px, calc(100vw - 16px)); max-width: none;
   height: min(88dvh, 720px); max-height: calc(100dvh - 16px);
-  display: flex; flex-direction: column; gap: 10px;
+  flex-direction: column; gap: 10px;
   padding: 16px 16px 14px; color: #eef1ff; isolation: isolate;
   border: 1px solid rgba(105, 226, 211, .38); border-radius: 18px;
   background:
@@ -23,6 +23,9 @@
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .03), 0 0 48px rgba(105, 226, 211, .16), 0 30px 90px rgba(0, 0, 0, .7);
   scrollbar-width: none; overflow: hidden;
 }
+/* Layout must not override the browser's closed-dialog hiding rule. */
+.nix-guide:not([open]) { display: none; }
+.nix-guide[open] { display: flex; }
 /* Keyboard-up (spec 26.7.9): everything must fit the shrunken dialog - the viewport yields space,
    the subtitle steps out, min-heights drop so no child can spill past the bottom border. */
 .kb-open #guide-viewport { min-height: 90px; }

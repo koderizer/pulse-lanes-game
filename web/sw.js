@@ -5,7 +5,7 @@
 // FB3-ACH R-5 (ruling R31, spec 18 GO-5): -fb4 key; gameover.js precached.
 // FB3-WEB11 (ruling R47): -fb26 key; song.js and songs/manifest.js precached. No audio file is ever
 // precached or cached at runtime; song files and Range requests bypass this worker.
-const CACHE = 'pulse-lanes-pl-web-0.2.0-fb53';
+const CACHE = 'pulse-lanes-pl-web-0.2.0-fb54';
 const ASSETS = ['./', './index.html', './lobby.css', './app.js', './digest.js', './music.js', './score_voice.js',
   './lobby_model.js', './hud.js', './pause.js', './render.js', './render2d.js', './sfx.js', './gameover.js',
   './guide.js', './guide_data.js', './guide.css', './analytics.js',
