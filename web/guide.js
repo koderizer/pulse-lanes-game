@@ -29,6 +29,30 @@ function createViewport(doc, host, fallback) {
   };
 }
 
+// R67 owner bug: after keyboard focus during a run, iOS can leave the layout
+// viewport scrolled and/or the visual viewport zoomed. Top-layer dialogs then
+// PAINT correctly but HIT-TEST offset by the leftover scroll/scale, so taps on
+// one lobby button fire another. Normalize both: clamp every scroller to 0 and
+// run the WebKit stuck-zoom release (1px nudge) only when something is off.
+export function resetViewport() {
+  const doc = globalThis.document;
+  if (!doc || !doc.documentElement) return 0;
+  const win = doc.defaultView || globalThis;
+  const de = doc.documentElement, body = doc.body;
+  const vv = win.visualViewport;
+  const off = (de.scrollTop || 0) + (de.scrollLeft || 0) + (body && body.scrollTop ? body.scrollTop : 0) +
+    ((vv && (vv.offsetTop || vv.offsetLeft)) || 0) + ((vv && vv.scale > 1.01) ? 1 : 0);
+  if (!off) return 0;
+  if (de) de.scrollTop = 0;
+  if (body) body.scrollTop = 0;
+  try {
+    win.scrollTo(0, 1);
+    (win.requestAnimationFrame || (fn => setTimeout(fn, 16)))(() => { try { win.scrollTo(0, 0); } catch (e) {} });
+  } catch (e) {}
+  globalThis.__vpResets = (globalThis.__vpResets || 0) + 1;
+  return 1;
+}
+
 export function createGuide({document: doc = globalThis.document, track = guideTrack, random = Math.random} = {}) {
   const el = (tag, id, text) => {
     const node = doc.createElement(tag); if (id) node.id = id;
@@ -81,6 +105,7 @@ export function createGuide({document: doc = globalThis.document, track = guideT
   const input = el('textarea', 'guide-question'); // long questions (owner R62)
   input.rows = 1; input.placeholder = 'Ask about the lanes...';
   input.setAttribute('aria-label', 'Ask the Nix Guide');
+  input.addEventListener('blur', () => { setTimeout(resetViewport, 0); }); // R67: keyboard death can strand scroll/zoom
   input.addEventListener('input', () => { const h = input.scrollHeight; if (h) { input.style.height = 'auto'; input.style.height = Math.min(h, 96) + 'px'; } });
   const submit = button('guide-submit', 'Ask'); submit.setAttribute('aria-label', 'Ask');
   try { submit.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 21l18-9L3 3v7l12 2-12 2z"></path></svg>'; } catch { /* shim: keep the Ask label */ }
@@ -163,7 +188,7 @@ export function createGuide({document: doc = globalThis.document, track = guideT
     (menuPanel.querySelector?.('.guide-menu-item') || menuPanel.children[0])?.focus?.();
   }
   function closeMenu() { menuOpen = false; menuPanel.hidden = true; menuButton.focus?.(); }
-  function cleanup() { viewportApi.dispose(); exitLoop(); menuOpen = false; keyboardReset(); opener?.focus?.(); opener = null; }
+  function cleanup() { viewportApi.dispose(); exitLoop(); menuOpen = false; keyboardReset(); resetViewport(); opener?.focus?.(); opener = null; }
   function close() {
     pendingOpen = 0; trustedOpen = 0;
     if (!dialog.open) return;

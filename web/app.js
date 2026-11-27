@@ -1,4 +1,4 @@
-import {createGuide} from './guide.js';
+import {createGuide, resetViewport} from './guide.js';
 // Client loop. The only module that calls step/abandon on the game. Renderers, HUD,
 // lobby and audio receive read-only rows (map, course, state snapshots, view) from here.
 // New runs play pl-v3 (spec 21, ruling R35) in the lobby mode; the pl-v2 module stays for the
@@ -1864,3 +1864,9 @@ if (/[?&]dbg/.test(globalThis.location?.search ?? '')) {
   setInterval(render, 250);
   render();
 }
+
+// R67 owner bug (iOS mistargeted lobby taps): every dialog open/close is a
+// viewport-normalize point. 'close' and 'showModal' do not bubble, so listen
+// in the capture phase at the document.
+document.addEventListener('close', () => resetViewport(), true);
+document.addEventListener('showModal', () => resetViewport(), true);

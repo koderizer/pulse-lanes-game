@@ -575,3 +575,6 @@ body:has(#set-reduced-motion:checked) *,body:has(#set-reduced-motion:checked) *:
 #settings-dialog .icon:hover { background: #3d4c70; border-color: var(--cyan, #69e2d3); }
 #settings-dialog .icon:active { background: #242c46; }
 #settings-dialog .icon[disabled] { opacity: .45; }
+
+/* R67: dialog buttons never double-tap-zoom; #cluster/dial rules keep their own touch-action by specificity */
+dialog button{touch-action:manipulation}
