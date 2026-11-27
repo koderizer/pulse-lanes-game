@@ -185,7 +185,6 @@ function updateLobby() {
     ? `${{collision: 'Collision', complete: 'Complete', abandoned: 'Abandoned'}[lastRun.terminal_reason] ?? 'Unknown'} · ${formatKm(lastRun.distance)} KM · ${MODE_LABELS[lastRun.mode] ?? lastRun.mode} · seed ${lastRun.seed}`
     : lastResultText(lastRun);
   $('seed').textContent = String(lastSeed ?? seed);
-  $('retry').disabled = !retryEnabled({lastSeed});
   $('replay').disabled = !(game && typeof game.replayBytes === 'function' && game.state().status === 'ended' && recorded);
   showRendererKind();
   showSong();
@@ -1741,7 +1740,7 @@ function replaceSave(text) {
 }
 // Play = new seed: the unplayed seed shown in the lobby, then a fresh one for the next Play.
 $('play').onclick = () => { const next = seed; seed = randomSeed(); start(next); };
-$('retry').onclick = () => { if (retryEnabled({lastSeed})) start(lastSeed); };
+$('lobby-guide').onclick = () => guide.open($('lobby-guide')); // R61 owner: lobby Retry replaced by the Nix Guide (spec 26.7.1)
 $('save').onclick = () => persist();
 $('load').onclick = () => {
   try { const text = localStorage.getItem(STORAGE_KEY); if (text !== null) replaceSave(text); else notice('No local save yet.'); }

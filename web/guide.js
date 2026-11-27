@@ -50,7 +50,8 @@ export function createGuide({document: doc = globalThis.document, track = guideT
   const choices = el('div', 'guide-choices');
   const yes = button('guide-yes', 'Yes'), no = button('guide-no', 'No'), closeButton = button('guide-close', 'Close');
   choices.append(yes, no); result.append(resultTitle, body, number, prompt, choices);
-  dialog.append(title, el('p', '', "A navigator's book for the lanes."), host, fallback, label, input, submit, result, closeButton);
+  const sub = el('p', 'guide-sub', "A navigator's book for the lanes.");
+  dialog.append(title, sub, host, fallback, label, input, submit, result, closeButton);
   doc.body.append(dialog);
   const viewport = createViewport(doc, host, fallback);
   let depth = 0, looping = false, opener = null, lastClosedAt = 0;

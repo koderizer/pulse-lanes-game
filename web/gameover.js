@@ -247,14 +247,14 @@ function drawHeader(ctx, style) {
   ink.addColorStop(0, '#ffffff'); ink.addColorStop(1, style.ink);
   ctx.save();
   ctx.shadowColor = rgba(style.glow, 0.7); ctx.shadowBlur = 24;
-  // R60: the wordmark is "WARPNIX" with the "NIX" in brand purple (matches --warpnix-nix #b18cff;
-  // canvas cannot read CSS vars, keep the hex in sync with style.css).
+  // R60/R61: the wordmark is "WARPNIX" with the "NIX" in the lobby neon pink (matches --warpnix-nix
+  // / #ff5bd6 / lobby --mag; canvas cannot read CSS vars, keep the hex in sync with style.css).
   const wmFont = (px) => `italic 900 ${px}px ${FONT}`;
   ctx.font = wmFont(92);
   const wmSpan = ctx.measureText('WARP').width + ctx.measureText('NIX').width;
   ctx.font = wmFont(92 * Math.min(1, 700 / wmSpan));
   ctx.fillStyle = ink; ctx.fillText('WARP', 76, 142);
-  ctx.fillStyle = '#b18cff'; ctx.fillText('NIX', 76 + ctx.measureText('WARP').width, 142);
+  ctx.fillStyle = '#ff5bd6'; ctx.fillText('NIX', 76 + ctx.measureText('WARP').width, 142);
   ctx.restore();
   text(ctx, 'SPACE RACER  ·  ACHIEVEMENT', 80, 184, {font: `700 26px ${MONO}`, color: rgba(style.glow, 0.95), max: 700});
 }

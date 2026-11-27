@@ -139,7 +139,7 @@ dialog#lobby::after{content:"";position:absolute;inset:8px;z-index:-1;pointer-ev
 #lobby h1{margin:0;line-height:.9;font-size:clamp(34px,9vw,52px);font-weight:900;font-style:italic;letter-spacing:.06em;text-transform:uppercase}
 #lobby h1 .t1{background:linear-gradient(180deg,#fff 10%,var(--cyan) 90%);-webkit-background-clip:text;background-clip:text;color:transparent;
   filter:drop-shadow(0 0 10px rgba(105,226,211,.45))}
-#lobby h1 .t2{margin-left:.02em;color:var(--warpnix-nix, #b18cff);filter:drop-shadow(0 0 10px rgba(177,140,255,.6))}
+#lobby h1 .t2{margin-left:.28em;color:transparent;-webkit-text-stroke:1.5px var(--mag);filter:drop-shadow(0 0 8px rgba(255,91,214,.55))}
 #lobby .eyebrow{margin:6px 0 0;font:700 11px/1 var(--mono);letter-spacing:.32em;text-transform:uppercase;color:#8e9ab9}
 
 /* Shared graphic button look. */
