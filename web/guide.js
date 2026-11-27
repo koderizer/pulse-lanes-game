@@ -87,22 +87,24 @@ export function createGuide({document: doc = globalThis.document, track = guideT
   doc.body.append(dialog);
   const viewportApi = createViewport(doc, stage, fallback);
 
-  // R62b keyboard fit: when the soft keyboard eats the lower screen, anchor the dialog to the
-  // VISUAL viewport (top-aligned, shrunk) so the whole modal stays viewable; restore on close.
+  // R63 keyboard fit: detect the soft keyboard by BASELINE shrink (iOS also SCROLLS the layout
+  // viewport, so innerHeight-minus-offsetTop math misses it - never subtract offsetTop here),
+  // then reflow the dialog INSIDE the visual viewport: top = offsetTop + 8, height = vv.height - 16.
   const view = doc.defaultView, vv = view?.visualViewport;
+  let baseH = 0;
   function keyboardReset() {
     dialog.classList.remove('kb-open');
     if (!dialog.style) return;
     for (const k of ['insetBlockStart', 'insetBlockEnd', 'height', 'maxHeight']) dialog.style[k] = '';
   }
   function keyboardFit() {
-    if (!dialog.open || !vv || !view) return;
-    const overlap = view.innerHeight - vv.height - (vv.offsetTop || 0);
-    if (overlap > 120) {
+    if (!dialog.open || !vv) return;
+    if (!(baseH > 0) || vv.height > baseH) baseH = vv.height; // largest keyboard-free height seen
+    if (baseH - vv.height > 140) {
       dialog.classList.add('kb-open');
-      dialog.style.insetBlockStart = ((vv.offsetTop || 0) + 10) + 'px';
+      dialog.style.insetBlockStart = ((vv.offsetTop || 0) + 8) + 'px';
       dialog.style.insetBlockEnd = 'auto';
-      dialog.style.height = Math.max(300, vv.height - 20) + 'px';
+      dialog.style.height = Math.max(180, vv.height - 16) + 'px'; // fit wins over any floor (R63)
       dialog.style.maxHeight = 'none';
     } else keyboardReset();
   }
@@ -189,7 +191,8 @@ export function createGuide({document: doc = globalThis.document, track = guideT
     justClosedWithin: (ms) => Date.now() - lastClosedAt < ms,
     open(source = doc.activeElement, label = 'gameover') {
       if (dialog.open) return;
-      opener = source; reset(); dialog.showModal();
+      if (doc.body?.classList?.contains('running')) return; // R63: the guide never sits over live gameplay
+      opener = source; reset(); baseH = 0; dialog.showModal();
       viewportApi.render({preset: 'idle', assetId: null, text: 'Nix moon'});
       input.focus(); keyboardFit(); track('guide_opened', {source: label}); // R61: lobby opener reports 'lobby'
     },

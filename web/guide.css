@@ -27,6 +27,7 @@
    the subtitle steps out, min-heights drop so no child can spill past the bottom border. */
 .kb-open #guide-viewport { min-height: 90px; }
 .kb-open #guide-sub { display: none; }
+.kb-open #guide-faq { display: none; } /* quick replies wait for the keyboard to drop (chat norm) */
 .kb-open #guide-question { min-height: 40px; }
 .kb-open { gap: 8px; padding-bottom: 10px; }
 .nix-guide::backdrop { background: radial-gradient(circle at 50% 40%, rgba(10, 14, 34, .55), rgba(3, 4, 10, .92)); }
@@ -56,7 +57,8 @@
 #guide-stage canvas { display: block; margin: 0 auto; width: min(180px, 34dvh); height: auto; aspect-ratio: 1; border-radius: 10px; filter: drop-shadow(0 0 12px rgba(105, 226, 211, .25)); }
 #guide-fallback { margin: 8px 0 0; font: 10px/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: #a7afc9; }
 #guide-fallback:empty { display: none; }
-#guide-answer { width: 100%; }
+#guide-answer { width: 100%; min-width: 0; overflow-wrap: break-word; }
+#guide-result-body { overflow-wrap: break-word; }
 
 /* Answer typography in-viewport (spec 26.7.3). */
 #guide-result-title {
@@ -76,13 +78,12 @@
 #guide-yes { color: #101323; background: var(--cyan); border-color: var(--cyan); }
 #guide-choices[hidden], #guide-number[hidden] { display: none; }
 
-/* FAQ pills: horizontally scrollable tap row between viewport and chat bar. */
-#guide-faq { display: flex; gap: 8px; overflow-x: auto; padding: 2px; scrollbar-width: none; flex-wrap: nowrap; }
-#guide-faq::-webkit-scrollbar { display: none; }
+/* FAQ pills: wrap onto rows - nothing in the modal scrolls sideways (owner R63). */
+#guide-faq { display: flex; gap: 6px; row-gap: 6px; padding: 2px 0; flex-wrap: wrap; min-width: 0; }
 #guide-faq .faq-pill {
-  flex: 0 0 auto; margin: 0; min-height: 36px; padding: 8px 14px; border-radius: 999px;
+  flex: 0 1 auto; margin: 0; min-height: 34px; padding: 7px 12px; border-radius: 999px; max-width: 100%;
   font: 700 11px/1.2 var(--mono); letter-spacing: .08em; text-transform: uppercase;
-  color: #cfe6ff; background: rgba(16, 22, 44, .8); border: 1px solid #4c5a82; white-space: nowrap;
+  color: #cfe6ff; background: rgba(16, 22, 44, .8); border: 1px solid #4c5a82; white-space: normal;
 }
 #guide-faq .faq-pill:hover, #guide-faq .faq-pill:focus-visible { border-color: var(--mag); color: #fff; }
 

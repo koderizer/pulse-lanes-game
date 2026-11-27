@@ -766,6 +766,7 @@ for (const type of ['pointerup', 'pointercancel']) {
 // ------------------------------------------------------------------ run lifecycle
 function start(nextSeed) {
   if (!save) return notice('Import a valid save or choose New empty save before playing.');
+  try { guide.close(); } catch { /* R63: a stray reopen must never ride into gameplay; guide owns its state */ }
   if (running) stopRun();
   // A challenge banner stays while its seed is played (Play, then Retry); any other seed ends it.
   // R35.16.7: a challenge is its seed AND its mode (R35.6); switching the lobby mode ends it too.
