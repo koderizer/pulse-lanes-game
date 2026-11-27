@@ -699,7 +699,8 @@ const guide = createGuide({document});
 const gameOver = createGameOver({document, onBack: () => openLobby(),
   canReplay: () => retryEnabled({lastSeed}),
   onReplay: () => { if (retryEnabled({lastSeed})) start(lastSeed); },
-  onGuide: button => guide.open(button),
+  // R63: the card opener fires only while its host dialog is the visible one.
+  onGuide: button => { if (gameOver.dialog?.open) guide.open(button); },
   guideJustClosed: () => guide.justClosedWithin(250)});
 function openLobbyUnlessGameOver() { if (!gameOver.isOpen()) openLobby(); }
 
@@ -767,6 +768,10 @@ for (const type of ['pointerup', 'pointercancel']) {
 function start(nextSeed) {
   if (!save) return notice('Import a valid save or choose New empty save before playing.');
   try { guide.close(); } catch { /* R63: a stray reopen must never ride into gameplay; guide owns its state */ }
+  // R63: claim gameplay SYNCHRONOUSLY here (not only in closeLobby at the end of the heavy
+  // init): an iOS ghost click re-dispatched during start() used to land in a window where
+  // neither body.running nor a closed lobby blocked guide.open, opening the guide over gameplay.
+  document.body.classList.add('running');
   if (running) stopRun();
   // A challenge banner stays while its seed is played (Play, then Retry); any other seed ends it.
   // R35.16.7: a challenge is its seed AND its mode (R35.6); switching the lobby mode ends it too.
@@ -1741,7 +1746,7 @@ function replaceSave(text) {
 }
 // Play = new seed: the unplayed seed shown in the lobby, then a fresh one for the next Play.
 $('play').onclick = () => { const next = seed; seed = randomSeed(); start(next); };
-$('lobby-guide').onclick = () => guide.open($('lobby-guide'), 'lobby'); // R61 owner: lobby Retry replaced by the Nix Guide (spec 26.7.1)
+$('lobby-guide').onclick = () => { if (lobby.open) guide.open($('lobby-guide'), 'lobby'); }; // R63: host must be the visible dialog (ghost-proof). R61 owner: lobby Retry replaced by the Nix Guide (spec 26.7.1)
 $('save').onclick = () => persist();
 $('load').onclick = () => {
   try { const text = localStorage.getItem(STORAGE_KEY); if (text !== null) replaceSave(text); else notice('No local save yet.'); }

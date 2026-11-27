@@ -96,7 +96,7 @@
 #guide-bar:focus-within { outline: 3px solid var(--cyan); outline-offset: 2px; }
 #guide-question {
   flex: 1; box-sizing: border-box; min-height: 38px; max-height: 96px; resize: none;
-  font: 15px/1.4 var(--mono); padding: 9px 0; color: #eef1ff;
+  font: 16px/1.4 var(--mono); padding: 9px 0; color: #eef1ff; /* 16px floor: iOS auto-zooms the page when a focused text field is <16px (R63) */
   background: transparent; border: 0; border-radius: 0;
 }
 #guide-question::placeholder { color: #8e9ab9; }
