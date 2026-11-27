@@ -190,8 +190,20 @@ export function createGuide({document: doc = globalThis.document, track = guideT
   return {
     justClosedWithin: (ms) => Date.now() - lastClosedAt < ms,
     open(source = doc.activeElement, label = 'gameover') {
-      if (dialog.open) return;
-      if (doc.body?.classList?.contains('running')) return; // R63: the guide never sits over live gameplay
+      // R64: full open trail (spec 26.7.10) - every attempt records its origin and state, so a
+      // modal seen over gameplay on a remote device is diagnosable from one screenshot.
+      const trail = (globalThis.__guideOpens ??= []);
+      const note = (outcome) => { try {
+        trail.push({ t: Date.now(), label, outcome, source: source?.id || String(source?.className || source || ''),
+          running: !!doc.body?.classList?.contains('running'), dialogOpen: dialog.open,
+          stack: (new Error()).stack?.split('\n').slice(2, 5).join(' | ') });
+        if (trail.length > 25) trail.shift();
+        const dbg = doc.getElementById('dbg');
+        if (dbg) dbg.textContent += `\nguide-open ${label}:${outcome} from ${source?.id || '?'} running=${doc.body?.classList?.contains('running')}`;
+      } catch { /* telemetry must never block the guide */ } };
+      if (dialog.open) { note('blocked-already-open'); return; }
+      if (doc.body?.classList?.contains('running')) { note('blocked-running'); return; } // R63: never over live gameplay
+      note('opened');
       opener = source; reset(); baseH = 0; dialog.showModal();
       viewportApi.render({preset: 'idle', assetId: null, text: 'Nix moon'});
       input.focus(); keyboardFit(); track('guide_opened', {source: label}); // R61: lobby opener reports 'lobby'

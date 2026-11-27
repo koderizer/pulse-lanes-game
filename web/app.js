@@ -1815,7 +1815,11 @@ openLobby();
 requestAnimationFrame(frame);
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js')
-    .then(reg => { if (reg) reg.update(); return navigator.serviceWorker.ready; }) // R49: check for a new build on every boot
+    .then(reg => { if (reg) reg.update(); // R49: check for a new build on every boot
+      // R64: iOS checks for a new sw.js only on navigation; poll when the tab returns to
+      // foreground so a fixed build reaches pinned-home-screen users without a manual reload.
+      globalThis.addEventListener?.('visibilitychange', () => { if (globalThis.document.visibilityState === 'visible') reg.update(); });
+      return navigator.serviceWorker.ready; })
     .then(() => { if (!$('notice').textContent) notice('Offline build cached. You can play without a connection.'); })
     .catch(() => notice('Offline cache unavailable. Keep the local static server running to reload.'));
   navigator.serviceWorker.addEventListener('controllerchange', () => {
@@ -1826,7 +1830,10 @@ if ('serviceWorker' in navigator) {
   });
 }
 if (typeof caches !== 'undefined') caches.keys().then(keys => {
-  const key = keys.find(k => k.indexOf('pulse-lanes-pl-web-') === 0); // R49: visible build stamp
+  // R64: newest cache wins (numeric sort) - failed installs leave partial caches behind and
+  // find-first showed a stale name forever.
+  const key = keys.filter(k => k.indexOf('pulse-lanes-pl-web-') === 0)
+    .sort((a, b) => (Number(/fb(\d+)$/.exec(a)?.[1] || 0) - Number(/fb(\d+)$/.exec(b)?.[1] || 0)))[0]; // R49: visible build stamp
   const stamp = key ? key.slice(key.lastIndexOf('-') + 1) : 'no-cache';
   let tag = $('build-tag');
   if (!tag) {

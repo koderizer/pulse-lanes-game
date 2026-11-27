@@ -5,11 +5,11 @@
 // FB3-ACH R-5 (ruling R31, spec 18 GO-5): -fb4 key; gameover.js precached.
 // FB3-WEB11 (ruling R47): -fb26 key; song.js and songs/manifest.js precached. No audio file is ever
 // precached or cached at runtime; song files and Range requests bypass this worker.
-const CACHE = 'pulse-lanes-pl-web-0.2.0-fb50';
+const CACHE = 'pulse-lanes-pl-web-0.2.0-fb51';
 const ASSETS = ['./', './index.html', './lobby.css', './app.js', './digest.js', './music.js', './score_voice.js',
   './lobby_model.js', './hud.js', './pause.js', './render.js', './render2d.js', './sfx.js', './gameover.js',
   './guide.js', './guide_data.js', './guide.css', './analytics.js',
-  './ships.js', './ship_stats.js', './qr.js',, './challenge.js', './song.js', './songs/manifest.js',
+  './ships.js', './ship_stats.js', './qr.js', './challenge.js', './song.js', './songs/manifest.js',
   './manifest.webmanifest', './icons/icon.svg', './icons/icon-maskable.svg', './icons/icon-192.png',
   './icons/icon-512.png', './icons/icon-maskable-512.png', './icons/apple-touch-icon-180.png',
   '../src/sim/space_racer.js', '../src/sim/space_racer_v3.js', '../src/input/controls.js',
@@ -27,5 +27,15 @@ self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
   if (event.request.headers.has('range') || (url.pathname.includes('/songs/') && !url.pathname.endsWith('/songs/manifest.js'))) return;
   // Only static delivery uses the network; cached play has no remote dependency.
+  // R64: html/js go NETWORK-FIRST with the cache as offline fallback. A cache-first shell let a
+  // broken install (an ASSETS hole silently failed addAll) pin devices to a dead build forever.
+  // Everything else (icons, json) stays cache-first for offline.
+  const shell = /\.(html|js)$/.test(url.pathname) || url.pathname.endsWith('/');
+  if (shell) {
+    event.respondWith(fetch(event.request).then(res => {
+      const copy = res.clone(); caches.open(CACHE).then(c => c.put(event.request, copy)); return res;
+    }).catch(() => caches.match(event.request)));
+    return;
+  }
   event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request))); // static assets, localhost
 });
