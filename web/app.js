@@ -1740,7 +1740,7 @@ function replaceSave(text) {
 }
 // Play = new seed: the unplayed seed shown in the lobby, then a fresh one for the next Play.
 $('play').onclick = () => { const next = seed; seed = randomSeed(); start(next); };
-$('lobby-guide').onclick = () => guide.open($('lobby-guide')); // R61 owner: lobby Retry replaced by the Nix Guide (spec 26.7.1)
+$('lobby-guide').onclick = () => guide.open($('lobby-guide'), 'lobby'); // R61 owner: lobby Retry replaced by the Nix Guide (spec 26.7.1)
 $('save').onclick = () => persist();
 $('load').onclick = () => {
   try { const text = localStorage.getItem(STORAGE_KEY); if (text !== null) replaceSave(text); else notice('No local save yet.'); }

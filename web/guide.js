@@ -105,11 +105,11 @@ export function createGuide({document: doc = globalThis.document, track = guideT
   no.addEventListener('click', () => { exitLoop(); input.focus(); }); closeButton.addEventListener('click', close);
   return {
     justClosedWithin: (ms) => Date.now() - lastClosedAt < ms,
-    open(source = doc.activeElement) {
+    open(source = doc.activeElement, label = 'gameover') {
       if (dialog.open) return;
       opener = source; reset(); dialog.showModal();
       viewport.render({preset: 'idle', assetId: null, text: 'Nix moon'});
-      input.focus(); track('guide_opened', {source: 'gameover'});
+      input.focus(); track('guide_opened', {source: label}); // R61: lobby opener reports 'lobby'
     },
     close,
   };
