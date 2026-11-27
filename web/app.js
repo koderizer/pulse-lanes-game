@@ -863,7 +863,8 @@ function startCrashReplay() {
   // the exact asteroid field - fed the recorded trail rows in slow motion under a side camera
   // (frame.cam, additive hook in render.js). The renderer's own collision explode() detonates the
   // wall asteroid + ship burst again on the replayed terminal frame (replayArm + resetFx re-arm).
-  // The blackout drape hides the rewind jump. Fail-open: the timer or a tap always reaches the card.
+  // The blackout drape hides the rewind jump. Exit is EXPLICIT (SKIP button / Escape); the wall-clock
+  // failsafe timer is the only automatic path (stalled rAF).
   if (CRASH_DISABLED || crashReducedMotion() || !trail.length || crashCtl) return false;
   const span = trail.slice(Math.max(0, trail.length - CRASH_SPAN_TICKS));
   if (currState && currState.status === 'ended' && span[span.length - 1]?.state !== currState) {
@@ -873,14 +874,23 @@ function startCrashReplay() {
   const layer = document.createElement('div'); // blackout drape; the game canvas paints the scene
   layer.id = 'crash-scene';
   document.body.append(layer);
+  // R58 owner: skipping is EXPLICIT (button / Escape). Spill touches from gameplay must not eat the
+  // replay, so the veil swallows taps (pointer-events in CSS) and only #crash-skip responds. The
+  // button lives on the BODY, not inside the layer: the veil fades to 0 and children inherit opacity.
+  const skipBtn = document.createElement('button');
+  skipBtn.id = 'crash-skip';
+  skipBtn.type = 'button';
+  skipBtn.textContent = 'SKIP';
+  skipBtn.setAttribute('aria-label', 'Skip replay');
+  skipBtn.addEventListener?.('pointerdown', (ev) => { ev.preventDefault?.(); endCrash(); });
+  document.body.append(skipBtn);
   try { renderer.resetFx?.(); } catch { /* replay still plays without the re-arm hook */ }
   const playDur = (span.length / TICKS_PER_SECOND / CRASH_SLOWMO) * 1000;
   const duration = playDur + CRASH_HOLD_MS * DBG_HOLD_MULT;
-  crashCtl = {phase: 'replay', span, t0: 0, timer: 0, layer, done: false, armed: false, cut: -1, skip: null, playDur, duration};
+  crashCtl = {phase: 'replay', span, t0: 0, timer: 0, layer, skipBtn, done: false, armed: false, cut: -1, skip: null, playDur, duration};
   globalThis.__crashPhase = 'replay';
   globalThis.__crashDbg = {duration, playDur, mult: DBG_HOLD_MULT, spanLen: span.length, renderer: rendererKind, cuts: CRASH_CUTS.slice(), cut: undefined, armed: undefined, armCut: undefined};
-  crashCtl.skip = () => endCrash();
-  document.addEventListener?.('pointerdown', crashCtl.skip);
+  crashCtl.skip = (e) => { if (!e || e.key === 'Escape') endCrash(); }; // explicit desktop exit only
   document.addEventListener?.('keydown', crashCtl.skip);
   crashCtl.timer = setTimeout(endCrash, duration + CRASH_FAILSAFE_MS); // only fires if rAF stalls (hidden tab)
   return true;
@@ -927,7 +937,8 @@ function endCrash() {
   if (!ctl || ctl.done) return;
   ctl.done = true;
   clearTimeout(ctl.timer);
-  if (ctl.skip) { document.removeEventListener?.('pointerdown', ctl.skip); document.removeEventListener?.('keydown', ctl.skip); }
+  if (ctl.skip) { document.removeEventListener?.('keydown', ctl.skip); }
+  ctl.skipBtn?.remove?.();
   ctl.layer?.remove?.();
   crashCtl = null;
   globalThis.__crashPhase = 'done';
