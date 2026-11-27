@@ -1,8 +1,8 @@
 import {guideTrack} from './analytics.js';
-import {matchGuide, WHY_YES, WHY_NO} from './guide_data.js';
+import {matchGuide, WHY_YES, WHY_NO, GUIDE_ENTRIES, GUIDE_FAQ} from './guide_data.js';
 
 // Dedicated 2D viewport. A still moon needs no rAF, including under reduced motion.
-// Unimplemented descriptors retain their text in the fallback slot for the next slice.
+// The moon is the IDLE view only; answers and the why-loop render in its place (R62 owner law).
 function createViewport(doc, host, fallback) {
   let canvas = null;
   return {
@@ -39,47 +39,102 @@ export function createGuide({document: doc = globalThis.document, track = guideT
   const dialog = el('dialog', 'nix-guide'); dialog.className = 'nix-guide';
   dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
   dialog.setAttribute('aria-labelledby', 'nix-guide-title');
+
+  // R62 chat layout: header (title, book menu, close) / viewport / FAQ pills / chat bar at bottom.
+  const head = el('div', 'guide-head');
   const title = el('h2', 'nix-guide-title', 'Nix Guide');
-  const host = el('div', 'guide-viewport'), fallback = el('p', 'guide-fallback');
-  const label = el('label', '', 'Ask about the lanes.'); label.setAttribute('for', 'guide-question');
-  const input = el('input', 'guide-question'); input.type = 'text'; input.placeholder = 'Ask about the lanes.';
-  const submit = button('guide-submit', 'Ask');
-  const result = el('div', 'guide-result'); result.setAttribute('aria-live', 'polite');
+  const menuButton = button('guide-menu', ''); menuButton.setAttribute('aria-label', 'Read all topics');
+  menuButton.textContent = '☰'; // glyph stand-in; SVG added only when innerHTML exists (shim-safe)
+  try { menuButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 5a2 2 0 0 1 2-2h11v16H7a2 2 0 0 0-2 2z"></path><path d="M9 3v14"></path></svg>'; } catch { /* shim: keep glyph */ }
+  const closeButton = button('guide-close', 'Close');
+  head.append(title, menuButton, closeButton);
+  const sub = el('p', 'guide-sub', "A navigator's book for the lanes.");
+
+  const viewport = el('div', 'guide-viewport');
+  const stage = el('div', 'guide-stage'), fallback = el('p', 'guide-fallback');
+  stage.append(fallback);
+  const answer = el('div', 'guide-answer'); answer.setAttribute('aria-live', 'polite'); answer.hidden = true;
   const resultTitle = el('h3', 'guide-result-title'), body = el('p', 'guide-result-body');
   const number = el('div', 'guide-number'), prompt = el('p', 'guide-prompt', 'Do you want to know why?');
   const choices = el('div', 'guide-choices');
-  const yes = button('guide-yes', 'Yes'), no = button('guide-no', 'No'), closeButton = button('guide-close', 'Close');
-  choices.append(yes, no); result.append(resultTitle, body, number, prompt, choices);
-  const sub = el('p', 'guide-sub', "A navigator's book for the lanes.");
-  dialog.append(title, sub, host, fallback, label, input, submit, result, closeButton);
+  const yes = button('guide-yes', 'Yes'), no = button('guide-no', 'No');
+  choices.append(yes, no);
+  // Answers and the why-loop render IN the viewport, where the moon was (owner R62).
+  answer.append(resultTitle, body, number, prompt, choices);
+  viewport.append(stage, answer);
+
+  const faq = el('div', 'guide-faq'); faq.setAttribute('aria-label', 'Frequently asked questions');
+  for (const topic of GUIDE_FAQ) {
+    const entry = GUIDE_ENTRIES.find(item => item.title === topic);
+    if (!entry) continue;
+    const pill = button('', entry.title); pill.className = 'faq-pill';
+    pill.addEventListener('click', () => { showEntry(entry); track('guide_faq_tap', {faq: true}); });
+    faq.append(pill);
+  }
+
+  const bar = el('div', 'guide-bar');
+  const input = el('textarea', 'guide-question'); // long questions (owner R62)
+  input.rows = 1; input.placeholder = 'Ask about the lanes...';
+  input.setAttribute('aria-label', 'Ask the Nix Guide');
+  input.addEventListener('input', () => { const h = input.scrollHeight; if (h) { input.style.height = 'auto'; input.style.height = Math.min(h, 96) + 'px'; } });
+  const submit = button('guide-submit', 'Ask');
+  bar.append(input, submit);
+
+  const menuPanel = el('div', 'guide-menu-panel'); menuPanel.hidden = true;
+  dialog.append(head, sub, viewport, faq, bar, menuPanel);
   doc.body.append(dialog);
-  const viewport = createViewport(doc, host, fallback);
-  let depth = 0, looping = false, opener = null, lastClosedAt = 0;
+  const viewportApi = createViewport(doc, stage, fallback);
+
+  let depth = 0, looping = false, opener = null, lastClosedAt = 0, menuOpen = false;
   function exitLoop() { looping = false; prompt.hidden = true; choices.hidden = true; }
   function reset() {
-    exitLoop(); depth = 0; number.hidden = true; resultTitle.textContent = ''; body.textContent = ''; input.value = '';
+    exitLoop(); depth = 0; number.hidden = true;
+    resultTitle.textContent = ''; body.textContent = ''; input.value = '';
+    if (input.style) input.style.height = '';
+    answer.hidden = true; stage.hidden = false; menuPanel.hidden = true; menuOpen = false;
   }
   function showNumber(value) {
+    stage.hidden = true; answer.hidden = false;
     number.hidden = false; number.textContent = String(value);
     prompt.hidden = false; choices.hidden = false;
-    viewport.render({preset: 'number', assetId: null, text: String(value)});
     track('guide_why_loop', {depth});
   }
   function advance() { if (looping) { depth++; showNumber(Math.floor(random() * 1000)); } }
+  function showEntry(entry) { // in-viewport answer, used by ask/match, FAQ pills and the book menu
+    exitLoop(); stage.hidden = true; answer.hidden = false; number.hidden = true;
+    resultTitle.textContent = entry?.title ?? ''; body.textContent = entry?.body ?? '';
+  }
   function ask() {
     const question = input.value.trim().toLowerCase(); input.value = '';
+    if (input.style) input.style.height = '';
     if (!question) return;
     if (looping && WHY_YES.includes(question)) { advance(); return; }
     if (looping && WHY_NO.includes(question)) { exitLoop(); return; }
     exitLoop();
     const match = matchGuide(question);
     track('guide_question', match ? {match: true} : {noMatch: true});
-    resultTitle.textContent = match?.title ?? ''; body.textContent = match?.body ?? '';
     number.hidden = true;
-    if (match) viewport.render(match.render);
+    if (match) showEntry(match);
     else { looping = true; depth = 1; track('guide_no_match', {}); showNumber(42); }
   }
-  function cleanup() { viewport.dispose(); exitLoop(); opener?.focus?.(); opener = null; }
+  function buildMenu() {
+    menuPanel.replaceChildren?.();
+    let group = null;
+    for (const entry of GUIDE_ENTRIES) {
+      if (entry.group !== group) { group = entry.group; const g = el('div'); g.className = 'guide-menu-group'; g.textContent = group; menuPanel.append(g); }
+      const item = button('', entry.title); item.className = 'guide-menu-item';
+      item.addEventListener('click', () => { showEntry(entry); closeMenu(); input.focus(); });
+      menuPanel.append(item);
+    }
+  }
+  function openMenu() {
+    if (menuOpen) return;
+    menuOpen = true; menuPanel.hidden = false; buildMenu();
+    track('guide_menu_opened', {});
+    (menuPanel.querySelector?.('.guide-menu-item') || menuPanel.children[0])?.focus?.();
+  }
+  function closeMenu() { menuOpen = false; menuPanel.hidden = true; menuButton.focus?.(); }
+  function cleanup() { viewportApi.dispose(); exitLoop(); menuOpen = false; opener?.focus?.(); opener = null; }
   function close() {
     if (!dialog.open) return;
     dialog.close(); cleanup();
@@ -90,25 +145,29 @@ export function createGuide({document: doc = globalThis.document, track = guideT
   function keydown(event) {
     if (!dialog.open) return;
     if (event.key === 'Escape') {
+      if (menuOpen) { event.preventDefault(); event.stopPropagation(); closeMenu(); return; } // menu first
       event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.(); close();
     } else if (event.key === 'Tab') {
-      const stops = [input, submit, ...(looping ? [yes, no] : []), closeButton];
+      const stops = menuOpen
+        ? [...(menuPanel.querySelectorAll?.('.guide-menu-item') || menuPanel.children), menuButton]
+        : [input, submit, ...(looping ? [yes, no] : []), closeButton, menuButton];
       const i = stops.indexOf(doc.activeElement);
       event.preventDefault(); stops[(i + (event.shiftKey ? -1 : 1) + stops.length) % stops.length].focus();
-    } else if (event.key === 'Enter' && event.target === input) { event.preventDefault(); ask(); }
+    } else if (event.key === 'Enter' && event.target === input && !event.shiftKey) { event.preventDefault(); ask(); }
   }
   // Capture prevents the same Escape from reaching any underlying dialog handlers.
   doc.addEventListener('keydown', keydown, true);
-  dialog.addEventListener('cancel', event => { event.preventDefault(); event.stopPropagation(); close(); });
+  dialog.addEventListener('cancel', event => { event.preventDefault(); event.stopPropagation(); if (menuOpen) { closeMenu(); return; } close(); });
   dialog.addEventListener('close', () => { if (!dialog.open) cleanup(); });
   submit.addEventListener('click', ask); yes.addEventListener('click', advance);
-  no.addEventListener('click', () => { exitLoop(); input.focus(); }); closeButton.addEventListener('click', close);
+  no.addEventListener('click', () => { exitLoop(); input.focus(); });
+  closeButton.addEventListener('click', close); menuButton.addEventListener('click', openMenu);
   return {
     justClosedWithin: (ms) => Date.now() - lastClosedAt < ms,
     open(source = doc.activeElement, label = 'gameover') {
       if (dialog.open) return;
       opener = source; reset(); dialog.showModal();
-      viewport.render({preset: 'idle', assetId: null, text: 'Nix moon'});
+      viewportApi.render({preset: 'idle', assetId: null, text: 'Nix moon'});
       input.focus(); track('guide_opened', {source: label}); // R61: lobby opener reports 'lobby'
     },
     close,
