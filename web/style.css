@@ -9,7 +9,9 @@
    Opaque backdrop over the frozen game view; pointer-events:none because the skip listener
    lives on document and must never be blocked by the canvas itself. */
 #crash-scene{position:fixed;inset:0;width:100%;height:100%;z-index:40;pointer-events:auto;background:radial-gradient(120% 90% at 50% 45%,rgba(10,14,32,.92),rgba(3,5,15,.97));animation:crash-veil .3s ease-out forwards}
-/* R58: the only touch exit for the replay is this button (spec 26.5.3); the veil swallows other taps. */
-#crash-skip{position:fixed;left:50%;bottom:28%;transform:translateX(-50%);z-index:41;min-height:46px;padding:13px 30px;font:600 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.22em;text-transform:uppercase;color:#bfefff;background:rgba(8,14,30,.78);border:1px solid rgba(87,199,255,.65);border-radius:999px;box-shadow:0 0 18px rgba(87,199,255,.3);pointer-events:auto;touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none;cursor:pointer}
+/* R58/R59 spec 26.5.3: cinematic replay - every gameplay overlay hides, the SKIP pill is the only
+   UI (bottom-left corner), and the veil swallows all other taps. */
+body.crash-cinema #hud,body.crash-cinema #touch,body.crash-cinema #song-credits,body.crash-cinema #pause-overlay,body.crash-cinema #build-tag{display:none!important}
+#crash-skip{position:fixed;left:16px;bottom:18px;z-index:41;min-height:46px;padding:13px 30px;font:600 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.22em;text-transform:uppercase;color:#bfefff;background:rgba(8,14,30,.78);border:1px solid rgba(87,199,255,.65);border-radius:999px;box-shadow:0 0 18px rgba(87,199,255,.3);pointer-events:auto;touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none;cursor:pointer}
 #crash-skip:active{background:rgba(87,199,255,.25);box-shadow:0 0 26px rgba(87,199,255,.5)}
 @keyframes crash-veil{from{opacity:1}to{opacity:0}}

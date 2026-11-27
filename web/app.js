@@ -877,6 +877,7 @@ function startCrashReplay() {
   // R58 owner: skipping is EXPLICIT (button / Escape). Spill touches from gameplay must not eat the
   // replay, so the veil swallows taps (pointer-events in CSS) and only #crash-skip responds. The
   // button lives on the BODY, not inside the layer: the veil fades to 0 and children inherit opacity.
+  try { document.body.classList.add('crash-cinema'); } catch { /* shim/probe tolerant; CSS is cosmetic */ }
   const skipBtn = document.createElement('button');
   skipBtn.id = 'crash-skip';
   skipBtn.type = 'button';
@@ -938,6 +939,7 @@ function endCrash() {
   ctl.done = true;
   clearTimeout(ctl.timer);
   if (ctl.skip) { document.removeEventListener?.('keydown', ctl.skip); }
+  try { document.body.classList.remove('crash-cinema'); } catch { /* see add site */ }
   ctl.skipBtn?.remove?.();
   ctl.layer?.remove?.();
   crashCtl = null;
