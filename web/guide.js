@@ -72,18 +72,41 @@ export function createGuide({document: doc = globalThis.document, track = guideT
     faq.append(pill);
   }
 
+  // Chat field: the bar IS the visual input box; Ask sits inside it at the right (owner R62b).
   const bar = el('div', 'guide-bar');
   const input = el('textarea', 'guide-question'); // long questions (owner R62)
   input.rows = 1; input.placeholder = 'Ask about the lanes...';
   input.setAttribute('aria-label', 'Ask the Nix Guide');
   input.addEventListener('input', () => { const h = input.scrollHeight; if (h) { input.style.height = 'auto'; input.style.height = Math.min(h, 96) + 'px'; } });
-  const submit = button('guide-submit', 'Ask');
+  const submit = button('guide-submit', 'Ask'); submit.setAttribute('aria-label', 'Ask');
+  try { submit.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 21l18-9L3 3v7l12 2-12 2z"></path></svg>'; } catch { /* shim: keep the Ask label */ }
   bar.append(input, submit);
 
   const menuPanel = el('div', 'guide-menu-panel'); menuPanel.hidden = true;
   dialog.append(head, sub, viewport, faq, bar, menuPanel);
   doc.body.append(dialog);
   const viewportApi = createViewport(doc, stage, fallback);
+
+  // R62b keyboard fit: when the soft keyboard eats the lower screen, anchor the dialog to the
+  // VISUAL viewport (top-aligned, shrunk) so the whole modal stays viewable; restore on close.
+  const view = doc.defaultView, vv = view?.visualViewport;
+  function keyboardReset() {
+    dialog.classList.remove('kb-open');
+    if (!dialog.style) return;
+    for (const k of ['insetBlockStart', 'insetBlockEnd', 'height', 'maxHeight']) dialog.style[k] = '';
+  }
+  function keyboardFit() {
+    if (!dialog.open || !vv || !view) return;
+    const overlap = view.innerHeight - vv.height - (vv.offsetTop || 0);
+    if (overlap > 120) {
+      dialog.classList.add('kb-open');
+      dialog.style.insetBlockStart = ((vv.offsetTop || 0) + 10) + 'px';
+      dialog.style.insetBlockEnd = 'auto';
+      dialog.style.height = Math.max(300, vv.height - 20) + 'px';
+      dialog.style.maxHeight = 'none';
+    } else keyboardReset();
+  }
+  if (vv?.addEventListener) { vv.addEventListener('resize', keyboardFit); vv.addEventListener('scroll', keyboardFit); }
 
   let depth = 0, looping = false, opener = null, lastClosedAt = 0, menuOpen = false;
   function exitLoop() { looping = false; prompt.hidden = true; choices.hidden = true; }
@@ -134,7 +157,7 @@ export function createGuide({document: doc = globalThis.document, track = guideT
     (menuPanel.querySelector?.('.guide-menu-item') || menuPanel.children[0])?.focus?.();
   }
   function closeMenu() { menuOpen = false; menuPanel.hidden = true; menuButton.focus?.(); }
-  function cleanup() { viewportApi.dispose(); exitLoop(); menuOpen = false; opener?.focus?.(); opener = null; }
+  function cleanup() { viewportApi.dispose(); exitLoop(); menuOpen = false; keyboardReset(); opener?.focus?.(); opener = null; }
   function close() {
     if (!dialog.open) return;
     dialog.close(); cleanup();
@@ -168,7 +191,7 @@ export function createGuide({document: doc = globalThis.document, track = guideT
       if (dialog.open) return;
       opener = source; reset(); dialog.showModal();
       viewportApi.render({preset: 'idle', assetId: null, text: 'Nix moon'});
-      input.focus(); track('guide_opened', {source: label}); // R61: lobby opener reports 'lobby'
+      input.focus(); keyboardFit(); track('guide_opened', {source: label}); // R61: lobby opener reports 'lobby'
     },
     close,
   };

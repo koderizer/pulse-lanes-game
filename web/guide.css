@@ -21,8 +21,14 @@
     radial-gradient(60% 40% at -10% 70%, rgba(110, 120, 255, .14), transparent 60%),
     linear-gradient(180deg, #0a0e21 0%, #05060f 100%);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .03), 0 0 48px rgba(105, 226, 211, .16), 0 30px 90px rgba(0, 0, 0, .7);
-  scrollbar-width: none;
+  scrollbar-width: none; overflow: hidden;
 }
+/* Keyboard-up (spec 26.7.9): everything must fit the shrunken dialog - the viewport yields space,
+   the subtitle steps out, min-heights drop so no child can spill past the bottom border. */
+.kb-open #guide-viewport { min-height: 90px; }
+.kb-open #guide-sub { display: none; }
+.kb-open #guide-question { min-height: 40px; }
+.kb-open { gap: 8px; padding-bottom: 10px; }
 .nix-guide::backdrop { background: radial-gradient(circle at 50% 40%, rgba(10, 14, 34, .55), rgba(3, 4, 10, .92)); }
 .nix-guide::-webkit-scrollbar { display: none; }
 
@@ -80,15 +86,26 @@
 }
 #guide-faq .faq-pill:hover, #guide-faq .faq-pill:focus-visible { border-color: var(--mag); color: #fff; }
 
-/* Chat bar pinned at the bottom: long-question textarea + Ask. Enter sends, Shift+Enter newline. */
-#guide-bar { display: flex; gap: 8px; align-items: flex-end; }
+/* Chat field pinned at the bottom: the bar IS the input box, send control inside it at the right
+   (chat-app pattern, owner R62b). Enter sends, Shift+Enter newline; the field owns the focus ring. */
+#guide-bar {
+  display: flex; gap: 6px; align-items: flex-end;
+  background: #0b0f20; border: 1px solid #4c5a82; border-radius: 18px; padding: 5px 5px 5px 14px;
+}
+#guide-bar:focus-within { outline: 3px solid var(--cyan); outline-offset: 2px; }
 #guide-question {
-  flex: 1; box-sizing: border-box; min-height: 46px; max-height: 96px; resize: none;
-  font: 15px/1.4 var(--mono); padding: 12px; color: #eef1ff;
-  background: #0b0f20; border: 1px solid #4c5a82; border-radius: 12px;
+  flex: 1; box-sizing: border-box; min-height: 38px; max-height: 96px; resize: none;
+  font: 15px/1.4 var(--mono); padding: 9px 0; color: #eef1ff;
+  background: transparent; border: 0; border-radius: 0;
 }
 #guide-question::placeholder { color: #8e9ab9; }
-#guide-question:focus-visible { outline: 3px solid var(--cyan); outline-offset: 2px; }
+#guide-question:focus, #guide-question:focus-visible { outline: none; }
+#guide-submit {
+  flex: 0 0 auto; width: 40px; min-width: 40px; height: 40px; margin: 0; padding: 0;
+  border-radius: 50%; display: grid; place-items: center;
+}
+#guide-submit svg { width: 18px; height: 18px; display: block; }
+#guide-submit svg path { fill: currentColor; stroke: none; }
 
 /* Buttons: cyan primary (lobby .primary), ghost secondary with magenta press, uppercase mono. */
 .nix-guide button {
@@ -98,10 +115,10 @@
 }
 .nix-guide button:hover { border-color: var(--cyan); }
 .nix-guide button:active { border-color: var(--mag); background: rgba(255, 91, 214, .12); }
-#guide-submit { flex: 0 0 auto; color: #101323; background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 14px rgba(105, 226, 211, .35); }
+#guide-submit { color: #101323; background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 14px rgba(105, 226, 211, .35); }
 .nix-guide :focus-visible { outline: 3px solid var(--cyan); outline-offset: 3px; }
 
-/* Read-all book menu: overlay inside the dialog (spec 26.7.5). */
+/* Read-all book menu: overlay inside the dialog (spec 26.7.8). */
 #guide-menu-panel {
   position: absolute; inset: 0; z-index: 2; overflow: auto; padding: 18px 18px 24px;
   border-radius: 18px; background: linear-gradient(180deg, #0a0e21 0%, #05060f 100%);
