@@ -182,8 +182,16 @@ export function createGuide({document: doc = globalThis.document, track = guideT
   }
   // Capture prevents the same Escape from reaching any underlying dialog handlers.
   doc.addEventListener('keydown', keydown, true);
+  // R65: iOS can drop the visualViewport resize when the keyboard dies, leaving the dialog
+  // anchored mid-screen with Close out of reach. Re-check on any window-level reshuffle.
+  const rescue = () => { if (dialog.open && dialog.classList.contains('kb-open')) keyboardFit(); };
+  for (const ev of ['resize', 'orientationchange', 'focus', 'blur']) globalThis.addEventListener?.(ev, rescue);
+  if (globalThis.visualViewport) globalThis.visualViewport.addEventListener('scroll', rescue);
   dialog.addEventListener('cancel', event => { event.preventDefault(); event.stopPropagation(); if (menuOpen) { closeMenu(); return; } close(); });
   dialog.addEventListener('close', () => { if (!dialog.open) cleanup(); });
+  // R65: tap outside the panel (backdrop) closes - iOS users have no Escape key and a modal
+  // must always have a touch escape.
+  dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
   submit.addEventListener('click', ask); yes.addEventListener('click', advance);
   no.addEventListener('click', () => { exitLoop(); input.focus(); });
   closeButton.addEventListener('click', close); menuButton.addEventListener('click', openMenu);
