@@ -49,6 +49,10 @@ export function createGuide({document: doc = globalThis.document, track = guideT
   const closeButton = button('guide-close', 'Close');
   head.append(title, menuButton, closeButton);
   const sub = el('p', 'guide-sub', "A navigator's book for the lanes.");
+  // R65: build stamp INSIDE the header - a stuck-open modal is exactly when the field needs to
+  // read the build, and the dialog backdrop hides any page-level tag (top layer covers it).
+  const build = el('span', 'guide-build'); build.setAttribute('aria-hidden', 'true');
+  sub.append(build);
 
   const viewport = el('div', 'guide-viewport');
   const stage = el('div', 'guide-stage'), fallback = el('p', 'guide-fallback');

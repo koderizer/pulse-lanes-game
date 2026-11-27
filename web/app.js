@@ -1842,6 +1842,7 @@ if (typeof caches !== 'undefined') caches.keys().then(keys => {
     document.body.appendChild(tag);
   }
   tag.textContent = stamp;
+  document.getElementById('guide-build')?.replaceChildren(stamp); // R65: same stamp inside the guide header
 }).catch(() => {});
 // R49.2: ?dbg telemetry overlay - a silent failure must never be invisible again.
 if (/[?&]dbg/.test(globalThis.location?.search ?? '')) {

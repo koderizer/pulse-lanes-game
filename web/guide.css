@@ -28,6 +28,8 @@
 .kb-open #guide-viewport { min-height: 90px; }
 .kb-open #guide-sub { display: none; }
 .kb-open #guide-faq { display: none; } /* quick replies wait for the keyboard to drop (chat norm) */
+/* R65: build stamp inside the subtitle row (survives the dialog backdrop). */
+#guide-build { float: right; font: 600 10px/1.4 var(--mono); letter-spacing: .1em; color: var(--mag, #ff5bd6); }
 .kb-open #guide-question { min-height: 40px; }
 .kb-open { gap: 8px; padding-bottom: 10px; }
 .nix-guide::backdrop { background: radial-gradient(circle at 50% 40%, rgba(10, 14, 34, .55), rgba(3, 4, 10, .92)); }
