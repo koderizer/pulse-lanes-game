@@ -1,6 +1,6 @@
 {
-  "name": "Pulse Lanes",
-  "short_name": "Pulse Lanes",
+  "name": "Warpnix",
+  "short_name": "Warpnix",
   "description": "Neon tunnel racer: steer the dart through the lanes to the beat and dodge the asteroids.",
   "start_url": "./",
   "scope": "./",

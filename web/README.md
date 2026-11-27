@@ -1,4 +1,4 @@
-# Pulse Lanes local build
+# Warpnix local build
 
 No build step or downloaded dependencies are needed. From the repository root,
 run `python3 -m http.server 8080 --bind 127.0.0.1` and open

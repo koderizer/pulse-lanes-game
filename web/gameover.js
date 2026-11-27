@@ -247,7 +247,14 @@ function drawHeader(ctx, style) {
   ink.addColorStop(0, '#ffffff'); ink.addColorStop(1, style.ink);
   ctx.save();
   ctx.shadowColor = rgba(style.glow, 0.7); ctx.shadowBlur = 24;
-  text(ctx, 'PULSE LANES', 76, 142, {font: `italic 900 92px ${FONT}`, color: ink, max: 700});
+  // R60: the wordmark is "WARPNIX" with the "NIX" in brand purple (matches --warpnix-nix #b18cff;
+  // canvas cannot read CSS vars, keep the hex in sync with style.css).
+  const wmFont = (px) => `italic 900 ${px}px ${FONT}`;
+  ctx.font = wmFont(92);
+  const wmSpan = ctx.measureText('WARP').width + ctx.measureText('NIX').width;
+  ctx.font = wmFont(92 * Math.min(1, 700 / wmSpan));
+  ctx.fillStyle = ink; ctx.fillText('WARP', 76, 142);
+  ctx.fillStyle = '#b18cff'; ctx.fillText('NIX', 76 + ctx.measureText('WARP').width, 142);
   ctx.restore();
   text(ctx, 'SPACE RACER  ·  ACHIEVEMENT', 80, 184, {font: `700 26px ${MONO}`, color: rgba(style.glow, 0.95), max: 700});
 }
@@ -729,7 +736,8 @@ const pageStorage = () => { try { return globalThis.localStorage ?? null; } catc
 
 // storage: the best distance store backend (getItem / setItem), default the page localStorage.
 export function createGameOver({document: doc = globalThis.document, navigator: nav = globalThis.navigator, URL: Url = globalThis.URL,
-  storage = pageStorage(), onBack = () => {}} = {}) {
+  storage = pageStorage(), onBack = () => {}, onReplay = () => {}, canReplay = () => false, onGuide = () => {},
+  guideJustClosed = () => false} = {}) {
   const svgNs = doc.querySelector?.('svg')?.namespaceURI ?? null;
   const el = (tag, cls, text) => {
     const node = doc.createElement(tag);
@@ -738,7 +746,7 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
     return node;
   };
   const icon = name => {
-    if (!svgNs) return null;
+    if (!svgNs || !ICONS[name]) return null;
     const svg = doc.createElementNS(svgNs, 'svg');
     svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true'); svg.setAttribute('focusable', 'false');
     for (const d of ICONS[name]) { const p = doc.createElementNS(svgNs, 'path'); p.setAttribute('d', d); svg.append(p); }
@@ -774,7 +782,9 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
   const actions = el('div', 'go-actions');
   const makeCardButton = button('go-make primary', 'card', 'Make card');
   const backButton = button('go-back', 'lobby', 'Back to lobby');
-  actions.append(makeCardButton, backButton);
+  const replayButton = button('go-replay', null, 'Replay');
+  const guideButton = button('go-guide', null, 'Nix Guide');
+  actions.append(replayButton, guideButton, makeCardButton, backButton);
   summary.append(eyebrow, title, scoreBox, stats, flavor, dataLine, statLine, actions);
 
   // Card view (GO-2..GO-4).
@@ -871,8 +881,8 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
     try {
       if (!nav.canShare({files: [file]})) return setHint(NO_SHARE);
       const headline = isV3(result) ? `${formatKm(result.distance)} KM (${MODE_LABELS[result.mode] ?? result.mode})` : `score ${result.score}`;
-      await nav.share({files: [file], title: 'Pulse Lanes',
-        text: `${card?.tier ?? cardTier(result).name} run in Pulse Lanes: ${headline}, time ${formatTime(result.ticks, result.tps)}, seed ${result.seed}.`});
+      await nav.share({files: [file], title: 'Warpnix',
+        text: `${card?.tier ?? cardTier(result).name} run in Warpnix: ${headline}, time ${formatTime(result.ticks, result.tps)}, seed ${result.seed}.`});
       setHint(restingHint());
     } catch (err) {
       if (err?.name !== 'AbortError') setHint('Share did not finish. Use Save image instead.');
@@ -933,6 +943,7 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
   }
 
   function show(raw) {
+    replayButton.disabled = !canReplay();
     result = normalizeResult(raw);
     const v3 = isV3(result);
     // pl-v3: record iff the distance strictly beats the best stored before this run's card.
@@ -973,6 +984,8 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
   }
   function back() { hide(); onBack(); }
 
+  replayButton.addEventListener('click', () => { if (canReplay()) { hide(); onReplay(); } });
+  guideButton.addEventListener('click', () => onGuide(guideButton));
   makeCardButton.addEventListener('click', openCard);
   backButton.addEventListener('click', back);
   cardBackButton.addEventListener('click', back);
@@ -983,8 +996,11 @@ export function createGameOver({document: doc = globalThis.document, navigator: 
   dialog.addEventListener('cancel', event => { event.preventDefault(); back(); });
   // A browser may still close the modal on its own (repeated Escape or Android back without a
   // new gesture ignores preventDefault); that close also means Back to lobby, never a dead end.
+  // R60: when the Nix Guide closed on this same Escape press, the browser cascades the cancel to
+  // this dialog. Swallow it so Escape closes ONLY the guide.
+  dialog.addEventListener('cancel', (event) => { if (guideJustClosed()) event.preventDefault(); });
   dialog.addEventListener('close', () => { if (!closedByUs) { closedByUs = true; dropPendingInput(); onBack(); } });
 
-  return {show, hide, back, isOpen, openCard, dialog, canvas, elements: {makeCardButton, backButton, cardBackButton, selfieButton, saveButton, shareButton, hint},
+  return {show, hide, back, isOpen, openCard, dialog, canvas, elements: {replayButton, guideButton, makeCardButton, backButton, cardBackButton, selfieButton, saveButton, shareButton, hint},
     pngBlob: () => pngBlob()};
 }

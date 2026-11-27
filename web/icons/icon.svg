@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <!-- Pulse Lanes app icon (FB3-ICON3): slender swept dart aimed at the vanishing point (215, 190) on one 52 degree speed axis; trails behind, amber accent removed for a single-axis speed mark. Flat fills, no text, no external references. -->
+  <!-- Warpnix app icon (FB3-ICON3): slender swept dart aimed at the vanishing point (215, 190) on one 52 degree speed axis; trails behind, amber accent removed for a single-axis speed mark. Flat fills, no text, no external references. -->
   <rect x="0" y="0" width="512" height="512" fill="#070b14"/>
   <g opacity="0.8">
     <path d="M 249 294.6 A 110 110 0 0 1 117.9 241.6 M 107.4 167.1 A 110 110 0 0 1 218.8 80.1 M 288.6 108.3 A 110 110 0 0 1 308.3 248.3" fill="none" stroke="#4de8ff" stroke-width="12" stroke-linecap="round"/>

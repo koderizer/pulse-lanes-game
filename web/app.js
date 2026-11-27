@@ -1,3 +1,4 @@
+import {createGuide} from './guide.js';
 // Client loop. The only module that calls step/abandon on the game. Renderers, HUD,
 // lobby and audio receive read-only rows (map, course, state snapshots, view) from here.
 // New runs play pl-v3 (spec 21, ruling R35) in the lobby mode; the pl-v2 module stays for the
@@ -695,7 +696,12 @@ function buildChallengeUi() {
 // Game over (spec 18 GO-1, ruling R31): a finished run shows this modal first; Back to lobby
 // (or Escape) dismisses it and opens the lobby exactly as before. No run is in progress while
 // it is open. Idle timeouts leave an open game over modal in place instead of yanking it.
-const gameOver = createGameOver({document, onBack: () => openLobby()});
+const guide = createGuide({document});
+const gameOver = createGameOver({document, onBack: () => openLobby(),
+  canReplay: () => retryEnabled({lastSeed}),
+  onReplay: () => { if (retryEnabled({lastSeed})) start(lastSeed); },
+  onGuide: button => guide.open(button),
+  guideJustClosed: () => guide.justClosedWithin(250)});
 function openLobbyUnlessGameOver() { if (!gameOver.isOpen()) openLobby(); }
 
 function applySettingsToOutputs() {
